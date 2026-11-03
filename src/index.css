@@ -5,6 +5,16 @@
   --font-display: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Kolenkachel Kleurenschema */
+  --color-kolen-nacht: #3a3d40;
+  --color-kolen-dag: #e6e7e9;
+  --color-kolen-gloed: #d84315;
+  --color-kolen-vuur: #ff8f00;
+  --color-kolen-vlam: #00b4d8;
+
+  --color-kolen-kachel: #16181a;
+  --color-kolen-as: #282b2e;
 }
 
 @layer base {
@@ -21,4 +31,13 @@
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Kolenkachel Flame Glow Effects */
+.glow-kolen-vuur {
+  box-shadow: 0 0 20px -3px rgba(255, 143, 0, 0.35), 0 0 8px -1px rgba(216, 67, 21, 0.4);
+}
+
+.glow-kolen-vlam {
+  box-shadow: 0 0 16px -2px rgba(0, 180, 216, 0.4);
 }

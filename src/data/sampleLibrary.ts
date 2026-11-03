@@ -18,10 +18,12 @@ export const INITIAL_LOCAL_LIBRARY: LocalAudioTrack[] = [
     musicalKey: '6A',
     isrc: 'AUUM71500911',
     durationSec: 578,
-    tagSource: 'FLAC Vorbis',
+    tagSource: 'Spotify ID3v2.3',
+    id3TaggedFromSpotify: true,
+    id3TaggedAt: '2026-11-02T19:40:00Z',
     matchStatus: 'synced',
     lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedPlaylistIds: ['rule_melodic_club', 'rule_lossless_vault'],
+    syncedPlaylistIds: ['rule_year_2016', 'rule_melodic_club'],
     selectedMatch: {
       spotifyId: '1r9xUipOqoNwggBpENDsvJ',
       uri: 'spotify:track:1r9xUipOqoNwggBpENDsvJ',
@@ -252,10 +254,12 @@ export const INITIAL_LOCAL_LIBRARY: LocalAudioTrack[] = [
     musicalKey: '1B',
     isrc: 'NLB631700084',
     durationSec: 223,
-    tagSource: 'ID3v2.4',
+    tagSource: 'Spotify ID3v2.3',
+    id3TaggedFromSpotify: true,
+    id3TaggedAt: '2026-11-02T19:40:00Z',
     matchStatus: 'synced',
     lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedPlaylistIds: ['rule_nl_roadtrip'],
+    syncedPlaylistIds: ['rule_year_2017', 'rule_nl_roadtrip'],
     selectedMatch: {
       spotifyId: '0VjIjW4GlUZAMYd2vXMi3c',
       uri: 'spotify:track:0VjIjW4GlUZAMYd2vXMi3c',
@@ -663,6 +667,49 @@ export const INITIAL_LOCAL_LIBRARY: LocalAudioTrack[] = [
 
 export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
   {
+    id: 'rule_year_2021',
+    name: 'MP3Spot Jaar: 2021',
+    description: 'Automatische Spotify-afspeellijst voor alle beschikbare tracks uit releasejaar 2021.',
+    strategy: 'year',
+    isPublic: false,
+    autoSync: true,
+    filter: {
+      exactYear: 2021,
+      minConfidence: 68,
+    },
+    syncedTrackUris: [],
+  },
+  {
+    id: 'rule_year_2017',
+    name: 'MP3Spot Jaar: 2017',
+    description: 'Automatische Spotify-afspeellijst voor alle beschikbare tracks uit releasejaar 2017.',
+    strategy: 'year',
+    isPublic: false,
+    autoSync: true,
+    filter: {
+      exactYear: 2017,
+      minConfidence: 68,
+    },
+    spotifyPlaylistId: '37i9dQZF1DX4fpCWaHOned',
+    lastSyncedAt: '2026-11-02T19:40:00Z',
+    syncedTrackUris: ['spotify:track:0VjIjW4GlUZAMYd2vXMi3c'],
+  },
+  {
+    id: 'rule_year_2016',
+    name: 'MP3Spot Jaar: 2016',
+    description: 'Automatische Spotify-afspeellijst voor alle beschikbare tracks uit releasejaar 2016.',
+    strategy: 'year',
+    isPublic: false,
+    autoSync: true,
+    filter: {
+      exactYear: 2016,
+      minConfidence: 68,
+    },
+    spotifyPlaylistId: '37i9dQZF1DX6J5NfMJS675',
+    lastSyncedAt: '2026-11-02T19:40:00Z',
+    syncedTrackUris: ['spotify:track:1r9xUipOqoNwggBpENDsvJ'],
+  },
+  {
     id: 'rule_melodic_club',
     name: 'Melodic & Deep House Selectie (120–132 BPM)',
     description:
@@ -696,43 +743,13 @@ export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
     lastSyncedAt: '2026-11-02T19:40:00Z',
     syncedTrackUris: ['spotify:track:0VjIjW4GlUZAMYd2vXMi3c'],
   },
-  {
-    id: 'rule_lossless_vault',
-    name: 'Lossless Audiofiel Archief (FLAC / WAV)',
-    description:
-      'Alle lokaal gearchiveerde 16/24-bit FLAC en WAV masters die gematcht zijn in de Spotify catalogus.',
-    strategy: 'custom_rule',
-    isPublic: false,
-    autoSync: true,
-    filter: {
-      onlyLossless: true,
-      minConfidence: 80,
-    },
-    spotifyPlaylistId: '37i9dQZF1DWZeKCadgRdKQ',
-    lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedTrackUris: ['spotify:track:1r9xUipOqoNwggBpENDsvJ'],
-  },
-  {
-    id: 'rule_indie_focus',
-    name: 'Indie & Focus Sessies',
-    description:
-      'Automatische groepering voor Indie & Alternatief en Ambient & Neo-Classical bestanden.',
-    strategy: 'genre',
-    isPublic: false,
-    autoSync: true,
-    filter: {
-      maxBpm: 119,
-      minConfidence: 80,
-    },
-    syncedTrackUris: [],
-  },
 ];
 
 export const INITIAL_SYNC_HISTORY: SyncHistoryEntry[] = [
   {
     id: 'sync_hist_1',
     timestamp: '2026-11-02T19:40:00Z',
-    playlistName: 'Melodic & Deep House Selectie (120–132 BPM)',
+    playlistName: 'MP3Spot Jaar: 2016',
     addedTracks: 1,
     skippedDuplicates: 0,
     mode: 'local_staged',
@@ -741,7 +758,7 @@ export const INITIAL_SYNC_HISTORY: SyncHistoryEntry[] = [
   {
     id: 'sync_hist_2',
     timestamp: '2026-11-02T19:40:00Z',
-    playlistName: 'Nederpop & Roadtrip Favorieten',
+    playlistName: 'MP3Spot Jaar: 2017',
     addedTracks: 1,
     skippedDuplicates: 0,
     mode: 'local_staged',

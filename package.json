@@ -1,11 +1,11 @@
 {
-  "name": "react-example",
+  "name": "mp3spot",
   "private": true,
-  "version": "0.0.0",
+  "version": "2026.11.03",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "tsx scripts/version-build.ts && vite build",
     "start": "tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

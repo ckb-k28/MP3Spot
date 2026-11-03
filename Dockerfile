@@ -1,5 +1,5 @@
 # ==============================================================================
-# SpotiSync Studio — Production Dockerfile
+# MP3Spot — Production Dockerfile
 # Kan direct gebouwd worden vanaf GitHub in Dockhand / Portainer / Docker Compose
 # ==============================================================================
 FROM node:22-alpine
@@ -16,11 +16,11 @@ RUN npm install
 # Kopieer de volledige applicatiebroncode
 COPY . .
 
-# Bouw de productie-frontend via Vite
+# Bouw de productie-frontend (genereert automatisch buildversie year.month.day[.build#])
 RUN npm run build
 
 # Maak standaard mappen aan voor gemounte volumes:
-# /music    -> Lokale muziekcollectie (read-only mount vanaf NAS/server)
+# /music    -> Lokale muziekcollectie (read/write voor het terugschrijven van Spotify ID3-tags)
 # /app/data -> Persistente database/status opslag (tracks, afspeellijstregels, sync-historie)
 # /exports  -> Automatisch geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
 RUN mkdir -p /music /app/data /exports

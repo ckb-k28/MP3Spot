@@ -1,24 +1,25 @@
-# SpotiSync Studio
+# MP3Spot
 
-**SpotiSync Studio** is een zelf-gehoste webapplicatie die je lokale muziekbibliotheek (`.flac`, `.mp3`, `.m4a`, `.wav`, `.aiff`, `.ogg`, `.m3u8`) scant op basis van binaire audiometadata (`ID3v2.3/2.4`, `FLAC Vorbis`, `ID3v1`, `ISRC`, `BPM`, `Toonsoort`), deze nummers via een meertraps-matcher opzoekt in de **Spotify-catalogus**, en vervolgens **automatisch slimme afspeellijsten** aanmaakt en differentieel synchroniseert met je Spotify-account.
+**MP3Spot** is een zelf-gehoste webapplicatie die al je lokale muziekbestanden (`.mp3`, `.flac`, `.m4a`, `.wav`, `.aiff`, `.ogg`, `.m3u8`) scant, ze via een meertraps-matcher opzoekt in **Spotify**, de gevonden **Spotify-metadata als binaire ID3v2.3-tags terugschrijft naar je lokale bestanden**, en elk beschikbaar nummer automatisch in een **Spotify-jaarafspeellijst (op basis van releasejaar)** en slimme afspeellijsten plaatst.
 
 ---
 
 ## Belangrijkste Functionaliteiten
 
-- **Lokale Map- & Docker Volume Scanner**:
-  - Scan mappen rechtstreeks via een gemount Docker-volume (`/music`) op je NAS of thuisserver, óf sleep mappen vanuit je browser in de webinterface.
-  - Leest binaire `ID3v2.4`-, `ID3v2.3`- en `FLAC Vorbis`-headers uit (slechts de eerste 64–128 KB per bestand) voor razendsnelle indexering.
+- **Lokale Bestanden Voorzien van Spotify ID3-Tags (`ID3v2.3` Tagging)**:
+  - Schrijft de officiële Spotify-metadata (`TIT2` Titel, `TPE1` Artiest, `TALB` Album, `TYER` Releasejaar, `TCON` Genre, `TSRC` ISRC-code en `WOAF` Spotify Track URI) rechtstreeks terug in je lokale audiobestanden op het gemounte `/music`-volume én biedt een directe binaire `.mp3` ID3-download in de browser.
+- **Automatische Spotify Jaar-Afspeellijsten**:
+  - Zodra een lokaal nummer beschikbaar/gematcht is op Spotify, plaatst MP3Spot het automatisch in een Spotify-afspeellijst die ten minste het releasejaar vertegenwoordigt (bijv. `MP3Spot Jaar: 2016`, `MP3Spot Jaar: 2017`, `MP3Spot Jaar: 2021`), naast eventuele extra map-, genre- of BPM-lijsten.
 - **Meertraps Spotify Metadata Matcher**:
   - **Fase 1**: Exacte `ISRC`-code verificatie.
-  - **Fase 2**: Genormaliseerde Titel-, Artiest- en Album-matching (stript automatisch tags zoals `(Original Mix)` of `[Club Cut]`).
-  - **Fase 3**: Fuzzy matching en speelduurvergelijking (`Δ seconden`), met de mogelijkheid om voor twijfelgevallen (zoals *Radio Edit* vs. *Extended Mix*) met één klik de juiste Spotify-versie te kiezen.
-- **Automatische Slimme Afspeellijsten**:
-  - Genereer automatisch Spotify-afspeellijsten per lokale map, per genre, op basis van BPM-bereik (bijv. `120–132 BPM`) of uitsluitend voor Lossless-bestanden (`FLAC`/`WAV`).
+  - **Fase 2**: Genormaliseerde Titel-, Artiest- en Album-matching.
+  - **Fase 3**: Fuzzy matching en speelduurvergelijking (`Δ seconden`), met versie-selectie voor o.a. *Radio Edit* vs. *Extended Mix*.
 - **Differentiële Synchronisatie (Geen Duplicaten)**:
   - Berekent vooraf een *diff* per afspeellijst zodat enkel nieuwe `spotify:track:`-URI's worden toegevoegd en bestaande nummers nooit dubbel worden toegevoegd.
-- **Ingebouwde Login & SHA-256 Wachtwoordbeveiliging**:
-  - Beveiligd met een inlogpagina die gebruikersnaam en wachtwoord (of een veilige `SHA-256` hash) uitleest uit je `docker-compose.yml`.
+- **Automatische Build-Versienummering (`year.month.day[.build#]`)**:
+  - Elke build krijgt automatisch een versienummer op basis van `jaar.maand.dag.build#` via `scripts/version-build.ts`.
+  - De eerste build van de dag heeft `build# = 0` en wordt weergegeven als `YYYY.MM.DD` (bijv. `2026.11.03`).
+  - Elke volgende build op dezelfde dag voegt `.build#` toe (`2026.11.03.1`, `2026.11.03.2`, enz.).
 
 ---
 
@@ -31,9 +32,9 @@ Deze configuratie gebruikt `node:22-alpine`, kloont bij het starten automatisch 
 
 ```yaml
 services:
-  spotisync:
+  mp3spot:
     image: node:22-alpine
-    container_name: spotisync-studio
+    container_name: mp3spot
     restart: unless-stopped
     working_dir: /app
     ports:
@@ -41,13 +42,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - GIT_REPO_URL=https://github.com/JOUW_GEBRUIKERSNAAM/spotisync-studio.git
-      # --- Inloggegevens Webinterface ---
-      - APP_USERNAME=admin
-      # Kies APP_PASSWORD (platte tekst) OF APP_PASSWORD_HASH (SHA-256 hex):
-      - APP_PASSWORD=verander_dit_wachtwoord
-      - APP_PASSWORD_HASH=
-      - SESSION_SECRET=vervang_door_een_willekeurige_geheime_sleutel
+      - GIT_REPO_URL=https://github.com/JOUW_GEBRUIKERSNAAM/mp3spot.git
       # --- Volume Paden in de Container ---
       - MUSIC_LIBRARY_PATH=/music
       - DATA_PATH=/app/data
@@ -57,11 +52,11 @@ services:
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
       - APP_URL=http://localhost:3000
     volumes:
-      # 1. Jouw muziekmap op de server/NAS (read-only)
-      - /mnt/nas/muziek:/music:ro
+      # 1. Jouw muziekmap op de server/NAS (:rw zodat MP3Spot Spotify ID3-tags kan schrijven)
+      - /mnt/nas/muziek:/music:rw
       # 2. Persistente opslag voor de gekloonde repo, database en sync-status
-      - spotisync_repo:/app
-      - spotisync_data:/app/data
+      - mp3spot_repo:/app
+      - mp3spot_data:/app/data
       # 3. Map op de host waar geëxporteerde .m3u8/.json/.csv lijsten komen
       - ./exports:/exports
     command: >
@@ -76,8 +71,8 @@ services:
       npm run start"
 
 volumes:
-  spotisync_repo:
-  spotisync_data:
+  mp3spot_repo:
+  mp3spot_data:
 ```
 
 ### Optie B: Native Docker Git Build Stack
@@ -85,20 +80,17 @@ Docker Compose ondersteunt het rechtstreeks bouwen van een `Dockerfile` vanaf ee
 
 ```yaml
 services:
-  spotisync:
+  mp3spot:
     build:
-      context: https://github.com/JOUW_GEBRUIKERSNAAM/spotisync-studio.git#main
+      context: https://github.com/JOUW_GEBRUIKERSNAAM/mp3spot.git#main
       dockerfile: Dockerfile
-    container_name: spotisync-studio
+    container_name: mp3spot
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - APP_USERNAME=admin
-      - APP_PASSWORD_HASH= # Of gebruik APP_PASSWORD=...
-      - SESSION_SECRET=vervang_door_een_willekeurige_geheime_sleutel
       - MUSIC_LIBRARY_PATH=/music
       - DATA_PATH=/app/data
       - EXPORTS_PATH=/exports
@@ -106,45 +98,35 @@ services:
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
       - APP_URL=http://localhost:3000
     volumes:
-      - /mnt/nas/muziek:/music:ro
-      - spotisync_data:/app/data
+      - /mnt/nas/muziek:/music:rw
+      - mp3spot_data:/app/data
       - ./exports:/exports
 
 volumes:
-  spotisync_data:
+  mp3spot_data:
 ```
 
 ---
 
 ## Overzicht van Volume Mappings
 
-SpotiSync Studio maakt gebruik van drie duidelijke volume-mountpoints in de container:
+MP3Spot maakt gebruik van drie duidelijke volume-mountpoints in de container:
 
 | Container Pad | Omgevingsvariabele | Modus | Beschrijving | Voorbeeld Host Mapping |
 | :--- | :--- | :--- | :--- | :--- |
-| `/music` | `MUSIC_LIBRARY_PATH` | `:ro` (Alleen-lezen) | Hier mount je de hoofdmap van je lokale muziekcollectie op je NAS of server. SpotiSync wijzigt je audiobestanden nooit. | `/mnt/nas/muziek:/music:ro` |
-| `/app/data` | `DATA_PATH` | `:rw` (Lezen/Schrijven) | Bewaart `spotisync-state.json` (gescande bibliotheek, handmatige Spotify-koppelingen, slimme afspeellijstregels en sync-geschiedenis). | `spotisync_data:/app/data` of `./data:/app/data` |
-| `/exports` | `EXPORTS_PATH` | `:rw` (Lezen/Schrijven) | Map waar je met één klik vanuit de UI `.m3u8` afspeellijsten, `.json` mappings en `.csv` rapporten rechtstreeks naar je server wegschrijft (bijv. voor Plex, Jellyfin of Navidrome). | `./exports:/exports` |
+| `/music` | `MUSIC_LIBRARY_PATH` | `:rw` (Lezen/Schrijven) | Hier mount je de hoofdmap van je lokale muziekcollectie op je NAS of server. Gebruik `:rw` zodat MP3Spot de gevonden Spotify ID3v2.3-tags rechtstreeks in je audiobestanden kan bijschrijven. | `/mnt/nas/muziek:/music:rw` |
+| `/app/data` | `DATA_PATH` | `:rw` (Lezen/Schrijven) | Bewaart `mp3spot-state.json` (gescande bibliotheek, handmatige Spotify-koppelingen, jaar- en slimme afspeellijstregels en sync-geschiedenis). | `mp3spot_data:/app/data` of `./data:/app/data` |
+| `/exports` | `EXPORTS_PATH` | `:rw` (Lezen/Schrijven) | Map waar je met één klik vanuit de UI `.m3u8` afspeellijsten, `.json` mappings en `.csv` rapporten rechtstreeks naar je server wegschrijft. | `./exports:/exports` |
 
 ---
 
-## Authenticatie & Veilige Wachtwoordopties
 
-Je kunt het inlogscherm op drie manieren configureren via `docker-compose.yml`:
+## Build Versienummering (`year.month.day[.build#]`)
 
-1. **SHA-256 Wachtwoord Hash (`APP_PASSWORD_HASH` — Aanbevolen)**:
-   Zodat je wachtwoord nooit in platte tekst in je Dockhand YAML staat.
-   Je kunt de hash direct in de SpotiSync webinterface genereren via de knop **"Dockhand Stack YAML"**, of via je terminal:
-   ```bash
-   echo -n "jouw_geheime_wachtwoord" | sha256sum
-   ```
-   Plak de 64-karakter hex-string in `APP_PASSWORD_HASH`.
-2. **Direct Wachtwoord (`APP_PASSWORD`)**:
-   Stel `APP_USERNAME=admin` en `APP_PASSWORD=jouw_wachtwoord` in bij `environment:` in `docker-compose.yml`.
-3. **Docker Secrets Bestand (`APP_PASSWORD_FILE`)**:
-   Verwijs naar een gemount secret-bestand, bijvoorbeeld `APP_PASSWORD_FILE=/run/secrets/spotisync_password`.
-
-*(Wanneer geen van bovenstaande variabelen is ingesteld bij een eerste teststart, gebruikt de applicatie tijdelijk `admin` / `spotisync` en toont hiervan een melding op het inlogscherm).*
+Elke keer dat `npm run build` wordt uitgevoerd, werkt `scripts/version-build.ts` het bestand `src/version.json` bij:
+- **1e build van de dag (`build# = 0`)**: `2026.11.03`
+- **2e build van de dag (`build# = 1`)**: `2026.11.03.1`
+- **3e build van de dag (`build# = 2`)**: `2026.11.03.2`
 
 ---
 
@@ -153,26 +135,7 @@ Je kunt het inlogscherm op drie manieren configureren via `docker-compose.yml`:
 Om afspeellijsten live in je Spotify-account aan te maken en bij te werken:
 
 1. Ga naar het [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) en maak een nieuwe applicatie aan.
-2. Voeg bij **Redirect URIs** het adres van je SpotiSync-instantie toe gevolgd door `/auth/callback`, bijvoorbeeld:
-   - Lokaal / Thuisserver: `http://localhost:3000/auth/callback` (of je eigen domeinnaam)
+2. Voeg bij **Redirect URIs** het adres van je MP3Spot-instantie toe gevolgd door `/auth/callback`, bijvoorbeeld:
+   - Lokaal / Thuisserver: `http://localhost:3000/auth/callback`
 3. Vul `SPOTIFY_CLIENT_ID` en `SPOTIFY_CLIENT_SECRET` in bij je `docker-compose.yml` omgevingsvariabelen.
-4. Klik rechtsboven in SpotiSync Studio op **Verbind Spotify**.
-
----
-
-## Lokaal Ontwikkelen (Zonder Docker)
-
-```bash
-# 1. Installeer dependencies
-npm install
-
-# 2. Kopieer voorbeeld omgevingsvariabelen
-cp .env.example .env
-
-# 3. Start de full-stack ontwikkelserver (Express + Vite op poort 3000)
-npm run dev
-
-# 4. Bouw voor productie
-npm run build
-npm run start
-```
+4. Klik rechtsboven in MP3Spot op **Verbind Spotify**.

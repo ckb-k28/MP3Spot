@@ -1,6 +1,6 @@
 {
-  "name": "SpotiSync Studio",
-  "description": "Synchroniseer je lokale muziekbibliotheek en metadata efficiënt met Spotify en genereer automatisch slimme afspeellijsten.",
+  "name": "MP3Spot",
+  "description": "MP3Spot voorziet je lokale muziekbestanden van ID3-tags uit Spotify en maakt automatisch jaar- en slimme afspeellijsten aan.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -1,5 +1,5 @@
 # ==============================================================================
-# SpotiSync Studio — Dockhand / Docker Compose Stack (Zero-Copy vanaf GitHub)
+# MP3Spot — Dockhand / Docker Compose Stack (Zero-Copy vanaf GitHub)
 #
 # Plak deze YAML direct in een nieuwe Dockhand Stack. Docker bouwt of kloont
 # automatisch rechtstreeks vanuit je GitHub-repository zonder dat je handmatig
@@ -7,26 +7,19 @@
 # ==============================================================================
 
 services:
-  spotisync:
+  mp3spot:
     # Bouwt rechtstreeks vanaf GitHub zonder lokale bestanden op de host nodig te hebben.
     # Vervang deze URL door jouw eigen GitHub repository URL:
     build:
-      context: ${GIT_REPO_URL:-https://github.com/jouw-gebruikersnaam/spotisync-studio.git#main}
+      context: ${GIT_REPO_URL:-https://github.com/jouw-gebruikersnaam/mp3spot.git#main}
       dockerfile: Dockerfile
-    container_name: spotisync-studio
+    container_name: mp3spot
     restart: unless-stopped
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # --- Inloggegevens voor de SpotiSync Webinterface ---
-      - APP_USERNAME=${APP_USERNAME:-admin}
-      # Gebruik APP_PASSWORD voor een direct wachtwoord OF gebruik APP_PASSWORD_HASH (SHA-256)
-      # zodat je wachtwoord niet in platte tekst in je compose-bestand staat:
-      - APP_PASSWORD=${APP_PASSWORD:-verander_mij_direct}
-      - APP_PASSWORD_HASH=${APP_PASSWORD_HASH:-}
-      - SESSION_SECRET=${SESSION_SECRET:-genereer_een_willekeurige_geheime_sleutel_hier}
       # --- Spotify Developer API Gegevens (optioneel in te vullen) ---
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
@@ -36,12 +29,12 @@ services:
       - DATA_PATH=/app/data
       - EXPORTS_PATH=/exports
     volumes:
-      # 1. Muziekbibliotheek: Koppel je lokale muziekmap op je server/NAS (alleen-lezen)
-      - ${HOST_MUSIC_PATH:-/mnt/nas/muziek}:/music:ro
+      # 1. Muziekbibliotheek: Koppel je lokale muziekmap op je server/NAS (read-write zodat MP3Spot ID3-tags uit Spotify kan bijschrijven)
+      - ${HOST_MUSIC_PATH:-/mnt/nas/muziek}:/music:rw
       # 2. Persistente App Data: Bewaart je gescande bibliotheek, slimme regels en sync-historie
-      - ${HOST_DATA_PATH:-spotisync_data}:/app/data
+      - ${HOST_DATA_PATH:-mp3spot_data}:/app/data
       # 3. Afspeellijst Exports: Schrijft .m3u8, .json en .csv bestanden direct naar je server/NAS
       - ${HOST_EXPORTS_PATH:-./exports}:/exports
 
 volumes:
-  spotisync_data:
+  mp3spot_data:

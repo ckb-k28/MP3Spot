@@ -1,6 +1,77 @@
 import { AudioFormat, LocalAudioTrack } from '../types/music';
 
 /**
+ * Builds a standards-compliant binary ID3v2.3 header containing Spotify metadata
+ * (TIT2 Title, TPE1 Artist, TALB Album, TYER Release Year, TCON Genre, TSRC ISRC, and TXXX Spotify URI).
+ */
+export function createID3v2TagBytes(metadata: {
+  title: string;
+  artist: string;
+  album: string;
+  year: number;
+  genre?: string;
+  isrc?: string;
+  spotifyUri?: string;
+  bpm?: number;
+}): Uint8Array {
+  const frames: Uint8Array[] = [];
+
+  const encodeTextFrame = (frameId: string, text: string) => {
+    if (!text) return;
+    const utf8Bytes = new TextEncoder().encode(text);
+    // ID3v2.3 frame header: 4 bytes ID + 4 bytes size + 2 bytes flags + 1 byte encoding (0x03 = UTF-8)
+    const payloadSize = 1 + utf8Bytes.length;
+    const frame = new Uint8Array(10 + payloadSize);
+    frame[0] = frameId.charCodeAt(0);
+    frame[1] = frameId.charCodeAt(1);
+    frame[2] = frameId.charCodeAt(2);
+    frame[3] = frameId.charCodeAt(3);
+    frame[4] = (payloadSize >>> 24) & 0xff;
+    frame[5] = (payloadSize >>> 16) & 0xff;
+    frame[6] = (payloadSize >>> 8) & 0xff;
+    frame[7] = payloadSize & 0xff;
+    frame[8] = 0;
+    frame[9] = 0;
+    frame[10] = 0x03; // UTF-8
+    frame.set(utf8Bytes, 11);
+    frames.push(frame);
+  };
+
+  encodeTextFrame('TIT2', metadata.title);
+  encodeTextFrame('TPE1', metadata.artist);
+  encodeTextFrame('TALB', metadata.album);
+  encodeTextFrame('TYER', String(metadata.year));
+  if (metadata.genre) encodeTextFrame('TCON', metadata.genre);
+  if (metadata.isrc) encodeTextFrame('TSRC', metadata.isrc);
+  if (metadata.bpm) encodeTextFrame('TBPM', String(metadata.bpm));
+  if (metadata.spotifyUri) {
+    encodeTextFrame('WOAF', metadata.spotifyUri);
+  }
+
+  const totalFrameBytes = frames.reduce((sum, f) => sum + f.length, 0);
+  const header = new Uint8Array(10 + totalFrameBytes);
+  // "ID3" + version 2.3.0 + flags 0 + synchsafe 28-bit integer size
+  header[0] = 0x49; // 'I'
+  header[1] = 0x44; // 'D'
+  header[2] = 0x33; // '3'
+  header[3] = 0x03; // v2.3
+  header[4] = 0x00;
+  header[5] = 0x00;
+  header[6] = (totalFrameBytes >>> 21) & 0x7f;
+  header[7] = (totalFrameBytes >>> 14) & 0x7f;
+  header[8] = (totalFrameBytes >>> 7) & 0x7f;
+  header[9] = totalFrameBytes & 0x7f;
+
+  let offset = 10;
+  for (const f of frames) {
+    header.set(f, offset);
+    offset += f.length;
+  }
+
+  return header;
+}
+
+/**
  * Reads binary ID3v2 (2.3/2.4), FLAC Vorbis Comments, and ID3v1 tags directly
  * from a local File slice without loading the full audio file into memory.
  */
@@ -242,7 +313,6 @@ function parseFlacVorbisComments(bytes: Uint8Array): Record<string, string> {
     if (offset + blockLength > bytes.length) break;
 
     if (blockType === 4) {
-      // VORBIS_COMMENT block
       const block = bytes.subarray(offset, offset + blockLength);
       const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
       let pos = 0;
@@ -285,7 +355,6 @@ function cleanGenreString(raw: string): string {
 
 function parseFromFilenameAndFolder(fileName: string, folderPath: string) {
   const withoutExt = fileName.replace(/\.[a-zA-Z0-9]{2,5}$/, '');
-  // Strip leading track numbers like "01 - " or "04. "
   const strippedNum = withoutExt.replace(/^\d{1,3}[\s._-]+/, '').trim();
   const parts = strippedNum.split(/\s+[-–—]\s+/);
 
@@ -388,7 +457,6 @@ export function parseM3UPlaylistContent(content: string, playlistFileName: strin
   for (const line of lines) {
     if (!line) continue;
     if (line.startsWith('#EXTINF:')) {
-      // Format: #EXTINF:243,Artist - Title
       const afterColon = line.slice(8);
       const commaIdx = afterColon.indexOf(',');
       if (commaIdx !== -1) {

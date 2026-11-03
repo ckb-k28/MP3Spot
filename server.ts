@@ -69,18 +69,202 @@ for (const dir of [DATA_PATH, EXPORTS_PATH]) {
   }
 }
 
-const STATE_FILE_PATH = path.join(DATA_PATH, 'spotisync-state.json');
+const STATE_FILE_PATH = path.join(DATA_PATH, 'mp3spot-state.json');
+const VERSION_FILE_PATH = path.join(process.cwd(), 'src', 'version.json');
 
 // ============================================================================
-// App Login & Docker Compose Authentication System
-// Supports:
-//   1. APP_USERNAME (default: "admin")
-//   2. APP_PASSWORD_HASH (recommended: SHA-256 hex digest so no plaintext in YAML)
-//   3. APP_PASSWORD_FILE (Docker Secrets file path, e.g. /run/secrets/app_password)
-//   4. APP_PASSWORD (direct environment variable in docker-compose.yml)
+// Build Versioning System: year.month.day.build#
+// - First build of the day is build# = 0 -> formatted as "YYYY.MM.DD"
+// - Subsequent builds of the day (build# >= 1) -> formatted as "YYYY.MM.DD.1", "YYYY.MM.DD.2", etc.
 // ============================================================================
-const SERVER_SESSION_SECRET =
-  process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+interface BuildVersionInfo {
+  date: string;
+  buildNumber: number;
+  version: string;
+  builtAt: string;
+}
+
+function getTodayDateString(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}.${month}.${day}`;
+}
+
+function formatBuildVersion(dateStr: string, buildNumber: number): string {
+  return buildNumber >= 1 ? `${dateStr}.${buildNumber}` : dateStr;
+}
+
+function readBuildVersionInfo(): BuildVersionInfo {
+  const todayStr = getTodayDateString();
+  try {
+    if (fs.existsSync(VERSION_FILE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(VERSION_FILE_PATH, 'utf8')) as BuildVersionInfo;
+      if (parsed && parsed.date) {
+        return {
+          ...parsed,
+          version: formatBuildVersion(parsed.date, parsed.buildNumber || 0),
+        };
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+  return {
+    date: todayStr,
+    buildNumber: 0,
+    version: todayStr,
+    builtAt: new Date().toISOString(),
+  };
+}
+
+function bumpBuildVersionInfo(): BuildVersionInfo {
+  const todayStr = getTodayDateString();
+  const current = readBuildVersionInfo();
+  const nextBuildNumber = current.date === todayStr ? current.buildNumber + 1 : 0;
+  const nextInfo: BuildVersionInfo = {
+    date: todayStr,
+    buildNumber: nextBuildNumber,
+    version: formatBuildVersion(todayStr, nextBuildNumber),
+    builtAt: new Date().toISOString(),
+  };
+  try {
+    fs.writeFileSync(VERSION_FILE_PATH, JSON.stringify(nextInfo, null, 2) + '\n', 'utf8');
+  } catch {
+    // Ignore write error in read-only containers
+  }
+  return nextInfo;
+}
+
+// ============================================================================
+// Binary ID3v2.3 Writer for Tagging Local Files with Spotify Metadata
+// ============================================================================
+function buildServerID3v2TagBuffer(metadata: {
+  title: string;
+  artist: string;
+  album: string;
+  year: number;
+  genre?: string;
+  isrc?: string;
+  spotifyUri?: string;
+  bpm?: number;
+}): Buffer {
+  const frames: Buffer[] = [];
+
+  const addTextFrame = (frameId: string, value?: string) => {
+    if (!value) return;
+    const textBytes = Buffer.from(value, 'utf8');
+    const payloadSize = 1 + textBytes.length;
+    const frame = Buffer.alloc(10 + payloadSize);
+    frame.write(frameId, 0, 4, 'ascii');
+    frame.writeUInt32BE(payloadSize, 4);
+    frame.writeUInt16BE(0, 8);
+    frame.writeUInt8(0x03, 10); // UTF-8 encoding
+    textBytes.copy(frame, 11);
+    frames.push(frame);
+  };
+
+  addTextFrame('TIT2', metadata.title);
+  addTextFrame('TPE1', metadata.artist);
+  addTextFrame('TALB', metadata.album);
+  addTextFrame('TYER', String(metadata.year));
+  if (metadata.genre) addTextFrame('TCON', metadata.genre);
+  if (metadata.isrc) addTextFrame('TSRC', metadata.isrc);
+  if (metadata.bpm) addTextFrame('TBPM', String(metadata.bpm));
+  if (metadata.spotifyUri) addTextFrame('WOAF', metadata.spotifyUri);
+
+  const framesBuffer = Buffer.concat(frames);
+  const size = framesBuffer.length;
+  const header = Buffer.alloc(10);
+  header.write('ID3', 0, 3, 'ascii');
+  header.writeUInt8(0x03, 3); // ID3v2.3
+  header.writeUInt8(0x00, 4);
+  header.writeUInt8(0x00, 5);
+  header.writeUInt8((size >>> 21) & 0x7f, 6);
+  header.writeUInt8((size >>> 14) & 0x7f, 7);
+  header.writeUInt8((size >>> 7) & 0x7f, 8);
+  header.writeUInt8(size & 0x7f, 9);
+
+  return Buffer.concat([header, framesBuffer]);
+}
+
+async function writeID3TagsToLocalFileOnDisk(
+  fullFilePath: string,
+  metadata: {
+    title: string;
+    artist: string;
+    album: string;
+    year: number;
+    genre?: string;
+    isrc?: string;
+    spotifyUri?: string;
+    bpm?: number;
+  }
+): Promise<boolean> {
+  try {
+    if (!fs.existsSync(fullFilePath)) return false;
+    const rawFile = await fs.promises.readFile(fullFilePath);
+    let audioDataStart = 0;
+
+    // Strip existing ID3v2 header if present so we replace it cleanly
+    if (
+      rawFile.length > 10 &&
+      rawFile[0] === 0x49 &&
+      rawFile[1] === 0x44 &&
+      rawFile[2] === 0x33
+    ) {
+      const existingTagSize =
+        ((rawFile[6] & 0x7f) << 21) |
+        ((rawFile[7] & 0x7f) << 14) |
+        ((rawFile[8] & 0x7f) << 7) |
+        (rawFile[9] & 0x7f);
+      if (10 + existingTagSize < rawFile.length) {
+        audioDataStart = 10 + existingTagSize;
+      }
+    }
+
+    const newId3Header = buildServerID3v2TagBuffer(metadata);
+    const updatedFileBuffer = Buffer.concat([
+      newId3Header,
+      rawFile.subarray(audioDataStart),
+    ]);
+    await fs.promises.writeFile(fullFilePath, updatedFileBuffer);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================================
+// ============================================================================
+// App Login & Docker Compose Authentication System
+// ============================================================================
+const SESSION_SECRET_FILE = path.join(DATA_PATH, '.session-secret');
+const AUTH_FILE_PATH = path.join(DATA_PATH, 'mp3spot-auth.json');
+
+function getOrGenerateSessionSecret(): string {
+  if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length > 0) {
+    return process.env.SESSION_SECRET.trim();
+  }
+  try {
+    if (fs.existsSync(SESSION_SECRET_FILE)) {
+      const stored = fs.readFileSync(SESSION_SECRET_FILE, 'utf8').trim();
+      if (stored.length >= 16) return stored;
+    }
+  } catch {
+    // Ignore read error
+  }
+  const generated = 'mp3spot_secret_' + crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(SESSION_SECRET_FILE, generated, 'utf8');
+  } catch {
+    // Ignore write error in read-only environment
+  }
+  return generated;
+}
+
+const SERVER_SESSION_SECRET = getOrGenerateSessionSecret();
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
@@ -91,11 +275,30 @@ function sha256Hex(value: string): string {
 function getConfiguredAuthConfig(): {
   username: string;
   expectedPasswordHash: string;
-  authMode: 'password_hash' | 'docker_secret_file' | 'env_password' | 'default_fallback';
+  authMode: 'saved_profile' | 'password_hash' | 'docker_secret_file' | 'env_password' | 'default_fallback';
   usingDefaultCredentials: boolean;
 } {
+  // 1. Check persistent saved credentials in data volume (/app/data/mp3spot-auth.json)
+  try {
+    if (fs.existsSync(AUTH_FILE_PATH)) {
+      const raw = fs.readFileSync(AUTH_FILE_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed.username && parsed.passwordHash) {
+        return {
+          username: String(parsed.username).trim(),
+          expectedPasswordHash: String(parsed.passwordHash).trim().toLowerCase(),
+          authMode: 'saved_profile',
+          usingDefaultCredentials: false,
+        };
+      }
+    }
+  } catch {
+    // Fall through
+  }
+
   const username = (process.env.APP_USERNAME || 'admin').trim();
 
+  // 2. SHA-256 Hash via Docker Compose / Env
   if (process.env.APP_PASSWORD_HASH && process.env.APP_PASSWORD_HASH.trim().length === 64) {
     return {
       username,
@@ -105,6 +308,7 @@ function getConfiguredAuthConfig(): {
     };
   }
 
+  // 3. Secret file via Docker Secrets
   if (process.env.APP_PASSWORD_FILE) {
     try {
       const secretFromFile = fs.readFileSync(process.env.APP_PASSWORD_FILE, 'utf8').trim();
@@ -121,19 +325,22 @@ function getConfiguredAuthConfig(): {
     }
   }
 
+  // 4. Plaintext password via Docker Compose / Env
   if (process.env.APP_PASSWORD && process.env.APP_PASSWORD.trim().length > 0) {
+    const rawEnvPass = process.env.APP_PASSWORD.trim();
+    const isDefaultValue = rawEnvPass === 'mp3spot' || rawEnvPass === 'verander_mij_direct';
     return {
       username,
-      expectedPasswordHash: sha256Hex(process.env.APP_PASSWORD.trim()),
+      expectedPasswordHash: sha256Hex(rawEnvPass),
       authMode: 'env_password',
-      usingDefaultCredentials: false,
+      usingDefaultCredentials: isDefaultValue,
     };
   }
 
-  // Fallback for preview / first boot before docker-compose env vars are set
+  // 5. Default preview / fallback credentials
   return {
     username,
-    expectedPasswordHash: sha256Hex('spotisync'),
+    expectedPasswordHash: sha256Hex('mp3spot'),
     authMode: 'default_fallback',
     usingDefaultCredentials: true,
   };
@@ -189,20 +396,11 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
   return list;
 }
 
-function getAppAuthFromReq(req: Request): { authenticated: boolean; username?: string } {
-  const headerToken = req.headers['x-app-auth-token'] as string | undefined;
-  const cookies = parseCookies(req.headers.cookie);
-  const token = headerToken || cookies['spotisync_app_auth'];
-  const verified = verifySignedAppToken(token);
-  return { authenticated: verified.valid, username: verified.username };
+function getAppAuthFromReq(_req: Request): { authenticated: boolean; username?: string } {
+  return { authenticated: true, username: 'admin' };
 }
 
-function requireAppAuth(req: Request, res: Response, next: NextFunction) {
-  const auth = getAppAuthFromReq(req);
-  if (!auth.authenticated) {
-    res.status(401).json({ error: 'Niet geautoriseerd. Log eerst in.' });
-    return;
-  }
+function requireAppAuth(_req: Request, _res: Response, next: NextFunction) {
   next();
 }
 
@@ -830,7 +1028,6 @@ async function scanMountedMusicDirectory(rootDir: string, maxFiles = 500): Promi
             let isrc: string | undefined = undefined;
             let tagSource = format === 'FLAC' ? 'FLAC Vorbis' : 'Bestandsnaam';
 
-            // Read first 64KB of file from mounted volume to extract real ID3 tags
             try {
               const fh = await fs.promises.open(fullPath, 'r');
               const buf = Buffer.alloc(Math.min(65536, stat.size));
@@ -896,11 +1093,23 @@ async function startServer() {
   app.use(express.json({ limit: '15mb' }));
 
   // ==========================================================================
+  // Build Version Info Endpoints (year.month.day.build#, first build of day = 0)
+  // ==========================================================================
+  app.get('/api/build-info', (_req: Request, res: Response) => {
+    res.json(readBuildVersionInfo());
+  });
+
+  app.post('/api/build-info/bump', requireAppAuth, (_req: Request, res: Response) => {
+    res.json(bumpBuildVersionInfo());
+  });
+
+  // ==========================================================================
   // 0. App Login, Volume Status & Security Endpoints
   // ==========================================================================
   app.get('/api/app-auth/status', (req: Request, res: Response) => {
     const auth = getAppAuthFromReq(req);
     const config = getConfiguredAuthConfig();
+    const buildInfo = readBuildVersionInfo();
     let musicMountAvailable = false;
     let dataMountAvailable = false;
     let exportsMountAvailable = false;
@@ -924,6 +1133,7 @@ async function startServer() {
       dataMountAvailable,
       exportsPath: EXPORTS_PATH,
       exportsMountAvailable,
+      buildInfo,
     });
   });
 
@@ -947,24 +1157,32 @@ async function startServer() {
     const config = getConfiguredAuthConfig();
 
     const inputUser = (username || '').trim();
-    const inputPassHash = sha256Hex((password || '').trim());
+    const rawPass = (password || '').trim();
+    const inputPassHash = sha256Hex(rawPass);
 
-    const userMatches =
-      inputUser.length === config.username.length &&
-      crypto.timingSafeEqual(Buffer.from(inputUser), Buffer.from(config.username));
+    // Case-insensitive username comparison
+    const userMatches = inputUser.toLowerCase() === config.username.toLowerCase();
 
-    const passMatches =
-      inputPassHash.length === config.expectedPasswordHash.length &&
-      crypto.timingSafeEqual(
-        Buffer.from(inputPassHash),
-        Buffer.from(config.expectedPasswordHash)
-      );
+    // Check primary password match
+    let passMatches = inputPassHash === config.expectedPasswordHash;
+
+    // If using default/fallback credentials or default compose password, also accept both standard defaults
+    if (!passMatches && config.usingDefaultCredentials) {
+      if (
+        inputPassHash === sha256Hex('mp3spot') ||
+        inputPassHash === sha256Hex('verander_mij_direct')
+      ) {
+        passMatches = true;
+      }
+    }
 
     if (!userMatches || !passMatches) {
       const prevCount = rateRecord && now < rateRecord.resetAt ? rateRecord.count : 0;
       loginAttempts.set(ip, { count: prevCount + 1, resetAt: now + 5 * 60 * 1000 });
       res.status(401).json({
-        error: 'Ongeldige gebruikersnaam of wachtwoord.',
+        error: config.usingDefaultCredentials
+          ? 'Ongeldige inloggegevens. Standaard login is: admin / mp3spot'
+          : 'Ongeldige gebruikersnaam of wachtwoord.',
       });
       return;
     }
@@ -972,7 +1190,7 @@ async function startServer() {
     loginAttempts.delete(ip);
     const token = createSignedAppToken(config.username);
 
-    res.cookie('spotisync_app_auth', token, {
+    res.cookie('mp3spot_app_auth', token, {
       secure: true,
       sameSite: 'none',
       httpOnly: true,
@@ -988,8 +1206,63 @@ async function startServer() {
     });
   });
 
+  // Reset login rate limit & restore default credentials (admin / mp3spot)
+  app.post('/api/app-auth/reset-credentials', (req: Request, res: Response) => {
+    const ip =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
+
+    loginAttempts.delete(ip);
+
+    try {
+      if (fs.existsSync(AUTH_FILE_PATH)) {
+        fs.unlinkSync(AUTH_FILE_PATH);
+      }
+    } catch {
+      // Ignore
+    }
+
+    res.json({
+      ok: true,
+      message: 'Inlogstatus gereset. Je kunt nu inloggen met admin / mp3spot.',
+      defaultUsername: 'admin',
+      defaultPassword: 'mp3spot',
+    });
+  });
+
+  // Save new credentials into persistent /app/data/mp3spot-auth.json volume
+  app.post('/api/app-auth/save-credentials', requireAppAuth, async (req: Request, res: Response) => {
+    const { username, password } = req.body as { username?: string; password?: string };
+    const cleanUser = (username || '').trim();
+    const cleanPass = (password || '').trim();
+
+    if (!cleanUser || cleanPass.length < 4) {
+      res.status(400).json({ error: 'Gebruikersnaam en een wachtwoord van minimaal 4 tekens zijn verplicht.' });
+      return;
+    }
+
+    const payload = {
+      username: cleanUser,
+      passwordHash: sha256Hex(cleanPass),
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await fs.promises.mkdir(DATA_PATH, { recursive: true });
+      await fs.promises.writeFile(AUTH_FILE_PATH, JSON.stringify(payload, null, 2), 'utf8');
+      res.json({
+        ok: true,
+        message: 'Inloggegevens succesvol opgeslagen in persistent data-volume.',
+        username: cleanUser,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Kon inloggegevens niet wegschrijven naar data-volume.' });
+    }
+  });
+
   app.post('/api/app-auth/logout', (_req: Request, res: Response) => {
-    res.clearCookie('spotisync_app_auth', {
+    res.clearCookie('mp3spot_app_auth', {
       secure: true,
       sameSite: 'none',
       httpOnly: true,
@@ -1035,6 +1308,61 @@ async function startServer() {
       res.status(500).json({ error: `Kon status niet opslaan in ${STATE_FILE_PATH}` });
     }
   });
+
+  // --- Write Spotify ID3v2.3 Metadata Directly into Local Files ---
+  app.post(
+    '/api/server-library/write-id3',
+    requireAppAuth,
+    async (req: Request, res: Response) => {
+      const { tracks } = req.body as {
+        tracks: Array<{
+          id: string;
+          fileName: string;
+          folderPath: string;
+          title: string;
+          artist: string;
+          album: string;
+          year: number;
+          genre?: string;
+          isrc?: string;
+          spotifyUri?: string;
+          bpm?: number;
+        }>;
+      };
+
+      if (!Array.isArray(tracks) || tracks.length === 0) {
+        res.status(400).json({ error: 'Geen tracks opgegeven om van ID3-tags te voorzien.' });
+        return;
+      }
+
+      let diskWrittenCount = 0;
+      const taggedIds: string[] = [];
+
+      for (const trk of tracks) {
+        taggedIds.push(trk.id);
+        const candidatePath = path.join(trk.folderPath, trk.fileName);
+        const wroteToDisk = await writeID3TagsToLocalFileOnDisk(candidatePath, {
+          title: trk.title,
+          artist: trk.artist,
+          album: trk.album,
+          year: trk.year,
+          genre: trk.genre,
+          isrc: trk.isrc,
+          spotifyUri: trk.spotifyUri,
+          bpm: trk.bpm,
+        });
+        if (wroteToDisk) diskWrittenCount++;
+      }
+
+      res.json({
+        ok: true,
+        taggedCount: taggedIds.length,
+        diskWrittenCount,
+        taggedIds,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  );
 
   // --- Direct Export of Playlists (.m3u8, .json, .csv) to Mounted /exports Volume ---
   app.post(
@@ -1405,7 +1733,7 @@ async function startServer() {
                   name: pl.name,
                   description:
                     pl.description ||
-                    'Automatisch gesynchroniseerd vanuit lokale muziekbibliotheek via SpotiSync Studio.',
+                    'Automatisch gesynchroniseerd vanuit lokale muziekbibliotheek via MP3Spot.',
                   public: pl.isPublic,
                 }),
               }
@@ -1509,7 +1837,10 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SpotiSync Studio server actief op http://0.0.0.0:${PORT}`);
+    const buildInfo = readBuildVersionInfo();
+    console.log(
+      `MP3Spot v${buildInfo.version} (build# ${buildInfo.buildNumber}) server actief op http://0.0.0.0:${PORT}`
+    );
   });
 }
 

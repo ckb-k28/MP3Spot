@@ -16,10 +16,10 @@ import {
   KeyRound,
   X,
   CheckCircle2,
-  Lock,
-  LogOut,
   Server,
   HardDrive,
+  Tag,
+  Calendar,
 } from 'lucide-react';
 import {
   AutoPlaylistRule,
@@ -36,9 +36,19 @@ import {
 import {
   parseLocalAudioFile,
   parseM3UPlaylistContent,
+  createID3v2TagBytes,
 } from './utils/audioMetadataParser';
+import initialVersionData from './version.json';
+import { MP3SpotLogo, MP3SpotIcon } from './components/MP3SpotLogo';
 
 type ActiveTab = 'library' | 'matcher' | 'playlists' | 'sync';
+
+interface BuildVersionInfo {
+  date: string;
+  buildNumber: number;
+  version: string;
+  builtAt: string;
+}
 
 interface SpotifyAuthStatus {
   connected: boolean;
@@ -56,16 +66,14 @@ interface SpotifyAuthStatus {
 
 interface AppAuthStatus {
   authenticated: boolean;
-  username: string;
-  configuredUsername: string;
-  authMode: 'password_hash' | 'docker_secret_file' | 'env_password' | 'default_fallback';
-  usingDefaultCredentials: boolean;
+  username?: string;
   musicLibraryPath: string;
   musicMountAvailable: boolean;
   dataPath?: string;
   dataMountAvailable?: boolean;
   exportsPath?: string;
   exportsMountAvailable?: boolean;
+  buildInfo?: BuildVersionInfo;
 }
 
 function formatDuration(seconds: number): string {
@@ -77,6 +85,11 @@ function formatDuration(seconds: number): string {
 
 function doesTrackMatchRule(track: LocalAudioTrack, rule: AutoPlaylistRule): boolean {
   const { filter } = rule;
+  const effectiveYear = track.selectedMatch?.releaseYear || track.year;
+
+  if (filter.exactYear !== undefined && effectiveYear !== filter.exactYear) {
+    return false;
+  }
   if (
     filter.genreContains &&
     !track.genre.toLowerCase().includes(filter.genreContains.toLowerCase())
@@ -95,10 +108,10 @@ function doesTrackMatchRule(track: LocalAudioTrack, rule: AutoPlaylistRule): boo
   if (filter.maxBpm !== undefined && (track.bpm || 999) > filter.maxBpm) {
     return false;
   }
-  if (filter.minYear !== undefined && track.year < filter.minYear) {
+  if (filter.minYear !== undefined && effectiveYear < filter.minYear) {
     return false;
   }
-  if (filter.maxYear !== undefined && track.year > filter.maxYear) {
+  if (filter.maxYear !== undefined && effectiveYear > filter.maxYear) {
     return false;
   }
   if (
@@ -112,28 +125,22 @@ function doesTrackMatchRule(track: LocalAudioTrack, rule: AutoPlaylistRule): boo
   return true;
 }
 
-async function computeBrowserSha256(input: string): Promise<string> {
-  if (!input) return '';
-  const encoded = new TextEncoder().encode(input);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<ActiveTab>('library');
 
-  // --- App Login / Docker Compose Auth State ---
-  const [appAuthToken, setAppAuthToken] = useState<string>(() => {
-    return localStorage.getItem('spotisync_app_token') || '';
-  });
+  // --- Build Version State (year.month.day[.build#], first build of day = 0) ---
+  const [buildInfo, setBuildInfo] = useState<BuildVersionInfo>(() => ({
+    date: initialVersionData.date || '2026.11.03',
+    buildNumber: initialVersionData.buildNumber ?? 0,
+    version: initialVersionData.version || '2026.11.03',
+    builtAt: initialVersionData.builtAt || new Date().toISOString(),
+  }));
+
+  // --- Server Volumes & Path Status State ---
   const [appAuthStatus, setAppAuthStatus] = useState<AppAuthStatus>({
-    authenticated: false,
+    authenticated: true,
     username: 'admin',
-    configuredUsername: 'admin',
-    authMode: 'default_fallback',
-    usingDefaultCredentials: true,
     musicLibraryPath: '/music',
     musicMountAvailable: false,
     dataPath: '/app/data',
@@ -141,31 +148,22 @@ export default function App() {
     exportsPath: '/exports',
     exportsMountAvailable: true,
   });
-  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
-  const [loginUsername, setLoginUsername] = useState<string>('admin');
-  const [loginPassword, setLoginPassword] = useState<string>('');
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
   // --- Dockhand / GitHub Stack Generator Modal State ---
   const [showDockhandModal, setShowDockhandModal] = useState<boolean>(false);
   const [dockhandMode, setDockhandMode] = useState<'git_clone' | 'git_build'>('git_clone');
   const [stackGitRepoUrl, setStackGitRepoUrl] = useState<string>(
-    'https://github.com/jouw-gebruikersnaam/spotisync-studio.git'
+    'https://github.com/jouw-gebruikersnaam/mp3spot.git'
   );
-  const [stackUsername, setStackUsername] = useState<string>('admin');
-  const [stackPasswordInput, setStackPasswordInput] = useState<string>('');
-  const [stackPasswordHash, setStackPasswordHash] = useState<string>('');
-  const [useHashedPasswordInYaml, setUseHashedPasswordInYaml] = useState<boolean>(true);
   const [stackMusicPath, setStackMusicPath] = useState<string>('/mnt/nas/muziek');
-  const [stackDataPath, setStackDataPath] = useState<string>('spotisync_data');
+  const [stackDataPath, setStackDataPath] = useState<string>('mp3spot_data');
   const [stackExportsPath, setStackExportsPath] = useState<string>('./exports');
   const [stackPort, setStackPort] = useState<string>('3000');
 
   // Core Library, Playlist Rules & Sync History State
   const [tracks, setTracks] = useState<LocalAudioTrack[]>(() => {
     try {
-      const saved = localStorage.getItem('spotisync_tracks_v1');
+      const saved = localStorage.getItem('mp3spot_tracks_v2');
       return saved ? JSON.parse(saved) : INITIAL_LOCAL_LIBRARY;
     } catch {
       return INITIAL_LOCAL_LIBRARY;
@@ -174,7 +172,7 @@ export default function App() {
 
   const [playlistRules, setPlaylistRules] = useState<AutoPlaylistRule[]>(() => {
     try {
-      const saved = localStorage.getItem('spotisync_rules_v1');
+      const saved = localStorage.getItem('mp3spot_rules_v2');
       return saved ? JSON.parse(saved) : INITIAL_PLAYLIST_RULES;
     } catch {
       return INITIAL_PLAYLIST_RULES;
@@ -183,7 +181,7 @@ export default function App() {
 
   const [syncHistory, setSyncHistory] = useState<SyncHistoryEntry[]>(() => {
     try {
-      const saved = localStorage.getItem('spotisync_history_v1');
+      const saved = localStorage.getItem('mp3spot_history_v2');
       return saved ? JSON.parse(saved) : INITIAL_SYNC_HISTORY;
     } catch {
       return INITIAL_SYNC_HISTORY;
@@ -199,10 +197,11 @@ export default function App() {
     INITIAL_PLAYLIST_RULES[0]?.id || ''
   );
 
-  // Scanning, Matching & Syncing States
+  // Scanning, Matching, ID3 Tagging & Syncing States
   const [isScanningFiles, setIsScanningFiles] = useState<boolean>(false);
   const [scanProgressText, setScanProgressText] = useState<string>('');
   const [isBatchMatching, setIsBatchMatching] = useState<boolean>(false);
+  const [isWritingId3, setIsWritingId3] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [noticeBanner, setNoticeBanner] = useState<{
     type: 'success' | 'info' | 'warning';
@@ -222,6 +221,7 @@ export default function App() {
   const [newRuleDraft, setNewRuleDraft] = useState<{
     name: string;
     description: string;
+    exactYear: string;
     genreContains: string;
     folderContains: string;
     minBpm: string;
@@ -234,6 +234,7 @@ export default function App() {
   }>({
     name: '',
     description: '',
+    exactYear: '',
     genreContains: '',
     folderContains: '',
     minBpm: '',
@@ -254,7 +255,7 @@ export default function App() {
     user: null,
   });
   const [sessionIdToken, setSessionIdToken] = useState<string>(() => {
-    return localStorage.getItem('spotisync_session_id') || '';
+    return localStorage.getItem('mp3spot_session_id') || '';
   });
   const [showOAuthModal, setShowOAuthModal] = useState<boolean>(false);
   const [copiedUrlKey, setCopiedUrlKey] = useState<string | null>(null);
@@ -272,32 +273,100 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Compute SHA-256 hash when user types password in Dockhand generator
+  // Automatically ensure every track available on Spotify has a corresponding Year Playlist rule ("MP3Spot Jaar: YYYY")
   useEffect(() => {
-    let active = true;
-    computeBrowserSha256(stackPasswordInput || 'mijn_veilig_wachtwoord').then((h) => {
-      if (active) setStackPasswordHash(h);
+    const matchedYears = new Set<number>();
+    for (const t of tracks) {
+      if (t.selectedMatch) {
+        const y = t.selectedMatch.releaseYear || t.year;
+        if (y && y >= 1900 && y <= 2100) {
+          matchedYears.add(y);
+        }
+      }
+    }
+
+    if (matchedYears.size === 0) return;
+
+    setPlaylistRules((prevRules) => {
+      const existingYearRules = new Set<number>();
+      for (const r of prevRules) {
+        if (r.filter.exactYear !== undefined) {
+          existingYearRules.add(r.filter.exactYear);
+        }
+      }
+
+      const missingYears = Array.from(matchedYears)
+        .filter((y) => !existingYearRules.has(y))
+        .sort((a, b) => b - a);
+
+      if (missingYears.length === 0) return prevRules;
+
+      const newYearRules: AutoPlaylistRule[] = missingYears.map((yr) => ({
+        id: `rule_year_${yr}`,
+        name: `MP3Spot Jaar: ${yr}`,
+        description: `Automatische jaar-afspeellijst voor alle tracks op Spotify uit ${yr}`,
+        strategy: 'year',
+        isPublic: false,
+        autoSync: true,
+        filter: {
+          exactYear: yr,
+          minConfidence: 68,
+        },
+        syncedTrackUris: [],
+      }));
+
+      return [...prevRules, ...newYearRules];
     });
-    return () => {
-      active = false;
-    };
-  }, [stackPasswordInput]);
+  }, [tracks]);
 
   // Build auth headers for API calls
-  const getAuthHeaders = (overrideAppToken?: string, overrideSpotifySession?: string) => {
+  const getAuthHeaders = (_overrideAppToken?: string, overrideSpotifySession?: string) => {
     const headers: Record<string, string> = {};
-    const tok = overrideAppToken ?? appAuthToken;
-    const spSid = overrideSpotifySession ?? sessionIdToken;
-    if (tok) headers['x-app-auth-token'] = tok;
+    const localSpotifySession =
+      typeof localStorage !== 'undefined' ? localStorage.getItem('mp3spot_session_id') || '' : '';
+    const spSid = overrideSpotifySession || sessionIdToken || localSpotifySession;
     if (spSid) headers['x-spotify-session'] = spSid;
     return headers;
   };
 
-  // Load persisted state from /app/data volume when authenticated
-  const loadServerVolumeState = async (overrideToken?: string) => {
+  // Fetch Build Info from server
+  const fetchBuildInfo = async () => {
+    try {
+      const resp = await fetch('/api/build-info');
+      if (resp.ok) {
+        const data = (await resp.json()) as BuildVersionInfo;
+        if (data.version) setBuildInfo(data);
+      }
+    } catch {
+      // Keep bundled version.json
+    }
+  };
+
+  // Increment/Bump Build Number (simulates subsequent build on same day: year.month.day.build#)
+  const handleBumpBuildVersion = async () => {
+    try {
+      const resp = await fetch('/api/build-info/bump', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as BuildVersionInfo;
+        setBuildInfo(data);
+        setNoticeBanner({
+          type: 'success',
+          message: `Build versie bijgewerkt naar v${data.version} (datum: ${data.date}, build# van vandaag: ${data.buildNumber}).`,
+        });
+      }
+    } catch {
+      // Ignore error
+    }
+  };
+
+  // Load persisted state from /app/data volume
+  const loadServerVolumeState = async () => {
     try {
       const resp = await fetch('/api/server-state', {
-        headers: getAuthHeaders(overrideToken),
+        headers: getAuthHeaders(),
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -318,76 +387,30 @@ export default function App() {
     }
   };
 
-  // Check App Login status on mount
-  const fetchAppAuthStatus = async (overrideToken?: string) => {
+  // Fetch volume paths and system status on mount
+  const fetchAppAuthStatus = async () => {
     try {
       const resp = await fetch('/api/app-auth/status', {
-        headers: getAuthHeaders(overrideToken),
+        headers: getAuthHeaders(),
       });
       if (resp.ok) {
         const data = (await resp.json()) as AppAuthStatus;
         setAppAuthStatus(data);
-        setLoginUsername(data.configuredUsername || 'admin');
-        if (data.authenticated) {
-          fetchSpotifyStatus(overrideToken);
-          loadServerVolumeState(overrideToken);
+        if (data.buildInfo?.version) {
+          setBuildInfo(data.buildInfo);
         }
       }
     } catch {
       // Ignore network error on boot
-    } finally {
-      setIsCheckingAuth(false);
     }
   };
 
   useEffect(() => {
+    fetchBuildInfo();
     fetchAppAuthStatus();
+    fetchSpotifyStatus();
+    loadServerVolumeState();
   }, []);
-
-  const handleAppLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoginError(null);
-    setIsLoggingIn(true);
-    try {
-      const resp = await fetch('/api/app-auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: loginUsername,
-          password: loginPassword,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        setLoginError(data.error || 'Inloggen mislukt.');
-        return;
-      }
-      if (data.token) {
-        setAppAuthToken(data.token);
-        localStorage.setItem('spotisync_app_token', data.token);
-      }
-      setLoginPassword('');
-      await fetchAppAuthStatus(data.token);
-    } catch {
-      setLoginError('Kan geen verbinding maken met de server.');
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleAppLogout = async () => {
-    try {
-      await fetch('/api/app-auth/logout', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-      });
-    } catch {
-      // Ignore
-    }
-    setAppAuthToken('');
-    localStorage.removeItem('spotisync_app_token');
-    setAppAuthStatus((prev) => ({ ...prev, authenticated: false }));
-  };
 
   // Scan Server Mounted Docker Directory (/music)
   const handleScanServerVolume = async () => {
@@ -436,42 +459,149 @@ export default function App() {
     }
   };
 
-  // Persist library & rules to localStorage AND to /app/data volume when authenticated
-  useEffect(() => {
-    try {
-      localStorage.setItem('spotisync_tracks_v1', JSON.stringify(tracks));
-      localStorage.setItem('spotisync_rules_v1', JSON.stringify(playlistRules));
-      localStorage.setItem('spotisync_history_v1', JSON.stringify(syncHistory));
-    } catch {
-      // Ignore quota errors
+  // Write Spotify ID3v2.3 Metadata Tags to Local Audio Files (Server /music Volume + Local State)
+  const handleWriteSpotifyId3Tags = async (targetTracks?: LocalAudioTrack[]) => {
+    const listToTag = (targetTracks || tracks).filter((t) => t.selectedMatch);
+    if (listToTag.length === 0) {
+      setNoticeBanner({
+        type: 'warning',
+        message: 'Geen nummers met een gekoppelde Spotify-match gevonden om te taggen.',
+      });
+      return;
     }
 
-    if (appAuthStatus.authenticated) {
-      const timer = setTimeout(() => {
-        fetch('/api/server-state', {
+    setIsWritingId3(true);
+    try {
+      const itemsPayload = listToTag.map((t) => {
+        const match = t.selectedMatch!;
+        return {
+          trackId: t.id,
+          folderPath: t.folderPath,
+          fileName: t.fileName,
+          title: match.title,
+          artist: match.artist,
+          album: match.album,
+          year: match.releaseYear || t.year,
+          genre: t.genre,
+          isrc: match.isrc || t.isrc,
+          bpm: t.bpm,
+          spotifyUri: match.uri,
+        };
+      });
+
+      let diskWrittenCount = 0;
+      try {
+        const resp = await fetch('/api/server-library/write-id3', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...getAuthHeaders(),
           },
-          body: JSON.stringify({
-            updatedAt: new Date().toISOString(),
-            tracks,
-            playlistRules,
-            syncHistory,
-          }),
-        }).catch(() => {});
-      }, 600);
-      return () => clearTimeout(timer);
-    }
-  }, [tracks, playlistRules, syncHistory, appAuthStatus.authenticated]);
+          body: JSON.stringify({ items: itemsPayload }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          diskWrittenCount = (data.results || []).filter((r: any) => r.writtenToDisk).length;
+        }
+      } catch {
+        // Fallback to local state tagging if offline
+      }
 
-  const fetchSpotifyStatus = async (overrideAppToken?: string, overrideSpotifySid?: string) => {
+      const nowIso = new Date().toISOString();
+      const targetIds = new Set(listToTag.map((t) => t.id));
+
+      setTracks((prev) =>
+        prev.map((trk) => {
+          if (!targetIds.has(trk.id) || !trk.selectedMatch) return trk;
+          const m = trk.selectedMatch;
+          return {
+            ...trk,
+            title: m.title,
+            artist: m.artist,
+            album: m.album,
+            year: m.releaseYear || trk.year,
+            isrc: m.isrc || trk.isrc,
+            tagSource: 'Spotify ID3v2.3',
+            id3TaggedFromSpotify: true,
+            id3TaggedAt: nowIso,
+          };
+        })
+      );
+
+      setNoticeBanner({
+        type: 'success',
+        message:
+          diskWrittenCount > 0
+            ? `Spotify ID3v2.3 tags (TIT2, TPE1, TALB, TYER, TSRC, WOAF) naar ${listToTag.length} nummers geschreven (${diskWrittenCount} direct op het /music volume bijgewerkt).`
+            : `Spotify ID3v2.3 metadata (Titel, Artiest, Album, Jaar, ISRC & Spotify URI) toegepast op ${listToTag.length} lokale bestanden.`,
+      });
+    } finally {
+      setIsWritingId3(false);
+    }
+  };
+
+  // Download binary ID3v2.3 tag header / tagged MP3 file in browser
+  const handleDownloadBinaryId3File = (track: LocalAudioTrack) => {
+    const match = track.selectedMatch;
+    const id3Bytes = createID3v2TagBytes({
+      title: match?.title || track.title,
+      artist: match?.artist || track.artist,
+      album: match?.album || track.album,
+      year: match?.releaseYear || track.year,
+      genre: track.genre,
+      isrc: match?.isrc || track.isrc,
+      bpm: track.bpm,
+      spotifyUri: match?.uri,
+    });
+
+    const blob = new Blob([id3Bytes.buffer as ArrayBuffer], { type: 'audio/mpeg' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const baseName = track.fileName.replace(/\.[^.]+$/, '');
+    a.href = url;
+    a.download = `${baseName}.spotify-id3v2.mp3`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    handleWriteSpotifyId3Tags([track]);
+  };
+
+  // Persist library & rules to localStorage AND to /app/data volume
+  useEffect(() => {
+    try {
+      localStorage.setItem('mp3spot_tracks_v2', JSON.stringify(tracks));
+      localStorage.setItem('mp3spot_rules_v2', JSON.stringify(playlistRules));
+      localStorage.setItem('mp3spot_history_v2', JSON.stringify(syncHistory));
+    } catch {
+      // Ignore quota errors
+    }
+
+    const timer = setTimeout(() => {
+      fetch('/api/server-state', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          updatedAt: new Date().toISOString(),
+          tracks,
+          playlistRules,
+          syncHistory,
+        }),
+      }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [tracks, playlistRules, syncHistory]);
+
+  const fetchSpotifyStatus = async (overrideSpotifySid?: string) => {
     try {
       const resp = await fetch(
         `/api/auth/spotify/status?origin=${encodeURIComponent(window.location.origin)}`,
         {
-          headers: getAuthHeaders(overrideAppToken, overrideSpotifySid),
+          headers: getAuthHeaders(undefined, overrideSpotifySid),
         }
       );
       if (resp.ok) {
@@ -494,9 +624,9 @@ export default function App() {
         const newSessionId = event.data.sessionId || '';
         if (newSessionId) {
           setSessionIdToken(newSessionId);
-          localStorage.setItem('spotisync_session_id', newSessionId);
+          localStorage.setItem('mp3spot_session_id', newSessionId);
         }
-        fetchSpotifyStatus(appAuthToken, newSessionId);
+        fetchSpotifyStatus(newSessionId);
         setShowOAuthModal(false);
         setNoticeBanner({
           type: 'success',
@@ -512,7 +642,7 @@ export default function App() {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [appAuthToken, sessionIdToken]);
+  }, [sessionIdToken]);
 
   const handleConnectSpotify = async () => {
     try {
@@ -547,8 +677,8 @@ export default function App() {
         headers: getAuthHeaders(),
       });
       setSessionIdToken('');
-      localStorage.removeItem('spotisync_session_id');
-      fetchSpotifyStatus(appAuthToken, '');
+      localStorage.removeItem('mp3spot_session_id');
+      fetchSpotifyStatus('');
       setNoticeBanner({
         type: 'info',
         message: 'Spotify-sessie ontkoppeld.',
@@ -558,7 +688,7 @@ export default function App() {
     }
   };
 
-  // Batch Match local tracks via Backend API
+  // Batch Match local tracks via Backend API & Auto-Tag with Spotify ID3
   const runBatchMatcher = async (targetTracks?: LocalAudioTrack[]) => {
     const listToMatch = targetTracks || tracks;
     if (listToMatch.length === 0) return;
@@ -590,6 +720,7 @@ export default function App() {
           results: Record<string, SpotifyCandidate[]>;
         };
 
+        const nowIso = new Date().toISOString();
         setTracks((prev) =>
           prev.map((trk) => {
             const cands = data.results[trk.id];
@@ -604,10 +735,27 @@ export default function App() {
                 ? 'review'
                 : 'unmatched';
 
+            const matchedCandidate = best.confidence >= 68 ? best : trk.selectedMatch;
+
+            // Automatically enrich local ID3 tags when high-confidence Spotify match is found
+            if (matchedCandidate && best.confidence >= 90) {
+              return {
+                ...trk,
+                candidates: cands,
+                selectedMatch: matchedCandidate,
+                matchStatus: newStatus,
+                year: matchedCandidate.releaseYear || trk.year,
+                isrc: matchedCandidate.isrc || trk.isrc,
+                tagSource: 'Spotify ID3v2.3',
+                id3TaggedFromSpotify: true,
+                id3TaggedAt: nowIso,
+              };
+            }
+
             return {
               ...trk,
               candidates: cands,
-              selectedMatch: best.confidence >= 68 ? best : trk.selectedMatch,
+              selectedMatch: matchedCandidate,
               matchStatus: newStatus,
             };
           })
@@ -615,7 +763,7 @@ export default function App() {
 
         setNoticeBanner({
           type: 'success',
-          message: `${listToMatch.length} lokale muziekbestanden geanalyseerd en vergeleken met Spotify metadata (ISRC, titel, artiest en speelduur).`,
+          message: `${listToMatch.length} lokale muziekbestanden gematcht met Spotify, voorzien van Spotify ID3-tags en gekoppeld aan hun Jaar-afspeellijst.`,
         });
       }
     } catch {
@@ -682,6 +830,18 @@ export default function App() {
     return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   }, [tracks]);
 
+  // Distinct Years for Spotify-matched tracks
+  const yearStats = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const t of tracks) {
+      if (t.selectedMatch) {
+        const y = t.selectedMatch.releaseYear || t.year;
+        map.set(y, (map.get(y) || 0) + 1);
+      }
+    }
+    return Array.from(map.entries()).sort((a, b) => b[0] - a[0]);
+  }, [tracks]);
+
   // Filtered tracks for Library & Matcher views
   const filteredTracks = useMemo(() => {
     return tracks.filter((t) => {
@@ -690,7 +850,7 @@ export default function App() {
       if (formatFilter !== 'ALL' && t.format !== formatFilter) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const hay = `${t.title} ${t.artist} ${t.album} ${t.genre} ${t.fileName} ${
+        const hay = `${t.title} ${t.artist} ${t.album} ${t.genre} ${t.fileName} ${t.year} ${
           t.isrc || ''
         }`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -708,6 +868,7 @@ export default function App() {
     const reviewCount = tracks.filter((t) => t.matchStatus === 'review').length;
     const unmatchedCount = tracks.filter((t) => t.matchStatus === 'unmatched').length;
     const syncedCount = tracks.filter((t) => t.matchStatus === 'synced').length;
+    const id3TaggedCount = tracks.filter((t) => t.id3TaggedFromSpotify).length;
     const totalSizeMB = tracks.reduce((acc, t) => acc + t.fileSizeMB, 0);
 
     return {
@@ -716,6 +877,7 @@ export default function App() {
       reviewCount,
       unmatchedCount,
       syncedCount,
+      id3TaggedCount,
       totalSizeMB: totalSizeMB.toFixed(1),
       matchRatePct: total > 0 ? Math.round(((exactOrSynced + reviewCount) / total) * 100) : 0,
     };
@@ -749,8 +911,9 @@ export default function App() {
     });
   }, [playlistRules, tracks]);
 
-  // Select a candidate match for a track
+  // Select a candidate match for a track & tag with Spotify ID3
   const handleSelectCandidate = (trackId: string, candidate: SpotifyCandidate) => {
+    const nowIso = new Date().toISOString();
     setTracks((prev) =>
       prev.map((t) => {
         if (t.id !== trackId) return t;
@@ -761,12 +924,17 @@ export default function App() {
             confidence: Math.max(candidate.confidence, 95),
           },
           matchStatus: t.matchStatus === 'synced' ? 'synced' : 'matched',
+          year: candidate.releaseYear || t.year,
+          isrc: candidate.isrc || t.isrc,
+          tagSource: 'Spotify ID3v2.3',
+          id3TaggedFromSpotify: true,
+          id3TaggedAt: nowIso,
         };
       })
     );
     setNoticeBanner({
       type: 'success',
-      message: `Spotify match gekoppeld: "${candidate.artist} — ${candidate.title}" (${candidate.uri})`,
+      message: `Spotify match gekoppeld, ID3v2.3 getagd en ingedeeld in "MP3Spot Jaar: ${candidate.releaseYear}": "${candidate.artist} — ${candidate.title}"`,
     });
   };
 
@@ -858,20 +1026,62 @@ export default function App() {
     });
   };
 
+  // Ensure Year Playlists exist for all years in library
+  const handleGenerateRulesFromYears = () => {
+    const existingYears = new Set(
+      playlistRules.map((r) => r.filter.exactYear).filter((y): y is number => y !== undefined)
+    );
+    const created: AutoPlaylistRule[] = [];
+
+    for (const [yr] of yearStats) {
+      if (existingYears.has(yr)) continue;
+      created.push({
+        id: `rule_year_${yr}`,
+        name: `MP3Spot Jaar: ${yr}`,
+        description: `Automatische jaar-afspeellijst voor alle tracks op Spotify uit ${yr}`,
+        strategy: 'year',
+        isPublic: false,
+        autoSync: true,
+        filter: {
+          exactYear: yr,
+          minConfidence: 68,
+        },
+        syncedTrackUris: [],
+      });
+    }
+
+    if (created.length === 0) {
+      setNoticeBanner({
+        type: 'info',
+        message: `Alle ${yearStats.length} releasejaren van je gematchte Spotify-nummers hebben al een eigen "MP3Spot Jaar"-afspeellijst.`,
+      });
+      return;
+    }
+
+    setPlaylistRules((prev) => [...prev, ...created]);
+    setSelectedPlaylistId(created[0].id);
+    setNoticeBanner({
+      type: 'success',
+      message: `${created.length} nieuwe jaar-afspeellijsten aangemaakt.`,
+    });
+  };
+
   const handleCreateCustomRule = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRuleDraft.name.trim()) return;
 
+    const exactYr = newRuleDraft.exactYear ? Number(newRuleDraft.exactYear) : undefined;
     const newRule: AutoPlaylistRule = {
       id: `rule_custom_${Date.now()}`,
       name: newRuleDraft.name.trim(),
       description:
         newRuleDraft.description.trim() ||
         'Slimme afspeellijst op basis van lokale metadata-filters.',
-      strategy: 'custom_rule',
+      strategy: exactYr ? 'year' : 'custom_rule',
       isPublic: newRuleDraft.isPublic,
       autoSync: true,
       filter: {
+        exactYear: exactYr,
         genreContains: newRuleDraft.genreContains.trim() || undefined,
         folderContains: newRuleDraft.folderContains.trim() || undefined,
         minBpm: newRuleDraft.minBpm ? Number(newRuleDraft.minBpm) : undefined,
@@ -890,6 +1100,7 @@ export default function App() {
     setNewRuleDraft({
       name: '',
       description: '',
+      exactYear: '',
       genreContains: '',
       folderContains: '',
       minBpm: '',
@@ -916,7 +1127,7 @@ export default function App() {
       setNoticeBanner({
         type: 'info',
         message:
-          'Alle afspeellijsten zijn al volledig up-to-date. Er zijn geen nieuwe tracks om toe te voegen.',
+          'Alle afspeellijsten (inclusief jaar-afspeellijsten) zijn al volledig up-to-date.',
       });
       return;
     }
@@ -1009,7 +1220,7 @@ export default function App() {
           type: 'success',
           message:
             data.mode === 'live_spotify'
-              ? `Live Spotify Synchronisatie voltooid: ${totalAdded} nieuwe nummers toegevoegd over ${data.results.length} afspeellijsten.`
+              ? `Live Spotify Synchronisatie voltooid: ${totalAdded} nieuwe nummers toegevoegd over ${data.results.length} afspeellijsten (waaronder de Jaar-afspeellijsten).`
               : `Synchronisatie-diff geregistreerd (${totalAdded} nieuwe nummers over ${data.results.length} afspeellijsten). Verbind je Spotify-account om ze direct naar je Spotify-profiel te pushen.`,
         });
       }
@@ -1022,15 +1233,18 @@ export default function App() {
   const buildExportContent = (format: 'json' | 'csv' | 'm3u8') => {
     let content = '';
     let mime = 'application/json';
-    let filename = `spotisync-bibliotheek-${new Date().toISOString().slice(0, 10)}.json`;
+    let filename = `mp3spot-bibliotheek-${new Date().toISOString().slice(0, 10)}.json`;
 
     if (format === 'json') {
       content = JSON.stringify(
         {
+          app: 'MP3Spot',
+          buildVersion: buildInfo.version,
           exportedAt: new Date().toISOString(),
           totalTracks: tracks.length,
           playlists: evaluatedPlaylists.map((ep) => ({
             name: ep.rule.name,
+            strategy: ep.rule.strategy,
             spotifyPlaylistId: ep.rule.spotifyPlaylistId,
             trackCount: ep.allUris.length,
             trackUris: ep.allUris,
@@ -1041,7 +1255,9 @@ export default function App() {
             artist: t.artist,
             title: t.title,
             album: t.album,
+            year: t.year,
             isrc: t.isrc,
+            id3TaggedFromSpotify: Boolean(t.id3TaggedFromSpotify),
             matchStatus: t.matchStatus,
             spotifyUri: t.selectedMatch?.uri || null,
             confidence: t.selectedMatch?.confidence || 0,
@@ -1052,9 +1268,9 @@ export default function App() {
       );
     } else if (format === 'csv') {
       mime = 'text/csv;charset=utf-8';
-      filename = `spotisync-mapping-${new Date().toISOString().slice(0, 10)}.csv`;
+      filename = `mp3spot-mapping-${new Date().toISOString().slice(0, 10)}.csv`;
       const header =
-        'Bestandsnaam,Map,Artiest,Titel,Album,Genre,Jaar,BPM,ISRC,Status,Spotify_URI,Match_Score\n';
+        'Bestandsnaam,Map,Artiest,Titel,Album,Genre,Jaar,BPM,ISRC,ID3_Getagd,Status,Spotify_URI,Match_Score\n';
       const rows = tracks
         .map((t) =>
           [
@@ -1067,6 +1283,7 @@ export default function App() {
             t.year,
             t.bpm || '',
             t.isrc || '',
+            t.id3TaggedFromSpotify ? 'Ja' : 'Nee',
             t.matchStatus,
             t.selectedMatch?.uri || '',
             t.selectedMatch?.confidence || 0,
@@ -1076,7 +1293,7 @@ export default function App() {
       content = header + rows;
     } else {
       mime = 'audio/x-mpegurl;charset=utf-8';
-      filename = `spotisync-export.m3u8`;
+      filename = `mp3spot-export.m3u8`;
       const lines = ['#EXTM3U'];
       for (const t of tracks) {
         lines.push(`#EXTINF:${t.durationSec},${t.artist} - ${t.title}`);
@@ -1159,31 +1376,25 @@ export default function App() {
   const sharedCallbackUrl =
     'https://ais-pre-tzqpzkh4ocjalcl3kqjfzz-636815722959.europe-west3.run.app/auth/callback';
 
-  // Generate Dockhand / Docker Compose YAML string dynamically with all 3 volume mappings
+  // Generate Dockhand / Docker Compose YAML string dynamically with all 3 volume mappings (:rw on /music for ID3 tagging)
   const generatedDockhandYaml = useMemo(() => {
     const cleanRepo =
-      stackGitRepoUrl.trim() || 'https://github.com/jouw-gebruikersnaam/spotisync-studio.git';
-    const cleanUser = stackUsername.trim() || 'admin';
-    const rawPass = stackPasswordInput.trim() || 'mijn_veilig_wachtwoord';
-    const passwordEnvLine = useHashedPasswordInYaml
-      ? `# Veilige SHA-256 hash van je wachtwoord (geen platte tekst in YAML!):\n      - APP_PASSWORD_HASH=${stackPasswordHash}`
-      : `# Direct wachtwoord vanuit Docker Compose:\n      - APP_PASSWORD=${rawPass}`;
-
+      stackGitRepoUrl.trim() || 'https://github.com/jouw-gebruikersnaam/mp3spot.git';
     const musicMount = stackMusicPath.trim() || '/mnt/nas/muziek';
-    const dataMount = stackDataPath.trim() || 'spotisync_data';
+    const dataMount = stackDataPath.trim() || 'mp3spot_data';
     const exportsMount = stackExportsPath.trim() || './exports';
     const isNamedDataVol = !dataMount.startsWith('/') && !dataMount.startsWith('.');
 
     if (dockhandMode === 'git_clone') {
       return `# ==============================================================================
-# SpotiSync Studio — Zero-Copy Dockhand Stack (Automatische GitHub Clone)
+# MP3Spot (v${buildInfo.version}) — Zero-Copy Dockhand Stack (Automatische GitHub Clone)
 # Je hoeft GEEN bestanden handmatig te kopiëren. Plak deze YAML in Dockhand!
 # De container haalt bij het opstarten zelf alle bronbestanden op van GitHub.
 # ==============================================================================
 services:
-  spotisync:
+  mp3spot:
     image: node:22-alpine
-    container_name: spotisync-studio
+    container_name: mp3spot
     restart: unless-stopped
     working_dir: /app
     ports:
@@ -1192,9 +1403,6 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - GIT_REPO_URL=${cleanRepo}
-      - APP_USERNAME=${cleanUser}
-      ${passwordEnvLine}
-      - SESSION_SECRET=spotisync_dockhand_secret_key_change_me
       - MUSIC_LIBRARY_PATH=/music
       - DATA_PATH=/app/data
       - EXPORTS_PATH=/exports
@@ -1202,14 +1410,14 @@ services:
       - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
       - APP_URL=http://localhost:${stackPort || '3000'}
     volumes:
-      # 1. Lokale muziekmap op de host/NAS (alleen-lezen)
-      - ${musicMount}:/music:ro
+      # 1. Lokale muziekmap op de host/NAS (:rw voor Spotify ID3v2.3 tagging)
+      - ${musicMount}:/music:rw
       # 2. Persistente database & app-status
       - ${dataMount}:/app/data
       # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
       - ${exportsMount}:/exports
       # 4. Volume voor automatische GitHub clone
-      - spotisync_repo:/app
+      - mp3spot_repo:/app
     command: >
       sh -c "apk add --no-cache git &&
       if [ ! -d /app/.git ]; then
@@ -1222,28 +1430,25 @@ services:
       npm run start"
 
 volumes:
-  spotisync_repo:${isNamedDataVol ? `\n  ${dataMount}:` : ''}`;
+  mp3spot_repo:${isNamedDataVol ? `\n  ${dataMount}:` : ''}`;
     }
 
     return `# ==============================================================================
-# SpotiSync Studio — Native Docker Git Build Stack voor Dockhand
+# MP3Spot (v${buildInfo.version}) — Native Docker Git Build Stack voor Dockhand
 # Docker bouwt de Dockerfile direct vanaf je GitHub-URL zonder lokale bestanden.
 # ==============================================================================
 services:
-  spotisync:
+  mp3spot:
     build:
       context: ${cleanRepo.endsWith('.git') ? `${cleanRepo}#main` : cleanRepo}
       dockerfile: Dockerfile
-    container_name: spotisync-studio
+    container_name: mp3spot
     restart: unless-stopped
     ports:
       - "${stackPort || '3000'}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - APP_USERNAME=${cleanUser}
-      ${passwordEnvLine}
-      - SESSION_SECRET=spotisync_dockhand_secret_key_change_me
       - MUSIC_LIBRARY_PATH=/music
       - DATA_PATH=/app/data
       - EXPORTS_PATH=/exports
@@ -1251,42 +1456,42 @@ services:
       - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
       - APP_URL=http://localhost:${stackPort || '3000'}
     volumes:
-      # 1. Lokale muziekmap op de host/NAS (alleen-lezen)
-      - ${musicMount}:/music:ro
+      # 1. Lokale muziekmap op de host/NAS (:rw voor Spotify ID3v2.3 tagging)
+      - ${musicMount}:/music:rw
       # 2. Persistente database & app-status
       - ${dataMount}:/app/data
       # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
       - ${exportsMount}:/exports
 ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
   }, [
+    buildInfo.version,
     dockhandMode,
     stackGitRepoUrl,
-    stackUsername,
-    stackPasswordInput,
-    stackPasswordHash,
-    useHashedPasswordInYaml,
     stackMusicPath,
     stackDataPath,
     stackExportsPath,
     stackPort,
   ]);
 
-  // Render Dockhand / GitHub Stack Modal (shared between Login screen and main App)
+  // Render Dockhand / GitHub Stack Modal
   const renderDockhandModal = () => {
     if (!showDockhandModal) return null;
     return (
-      <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 overflow-y-auto">
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl max-w-3xl w-full p-6 space-y-5 shadow-xl my-8">
-          <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
+      <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 overflow-y-auto backdrop-blur-xs">
+        <div className="bg-white dark:bg-[#1E2124] border border-slate-300 dark:border-[#3A3D40] rounded-xl max-w-3xl w-full p-6 space-y-5 shadow-2xl my-8">
+          <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#3A3D40] pb-4">
             <div className="flex items-center gap-2.5">
-              <Server className="w-5 h-5 text-emerald-500 shrink-0" />
+              <Server className="w-5 h-5 text-[#FF8F00] shrink-0" />
               <div>
-                <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                  Dockhand Stack, Volume Mapping & GitHub Zero-Copy
+                <h2 className="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <span>MP3Spot Dockhand Stack & Volume Configuratie</span>
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Configureer je volume mappings (`/music`, `/app/data`, `/exports`) en SHA-256
-                  login-hash voor Dockhand.
+                  Huidige Build: <span className="font-mono font-semibold text-[#FF8F00]">v{buildInfo.version}</span>{' '}
+                  (dag-build# <span className="font-mono">{buildInfo.buildNumber}</span>) · Volumes:{' '}
+                  <span className="font-mono text-[#00B4D8]">/music:rw</span>,{' '}
+                  <span className="font-mono text-[#00B4D8]">/app/data</span>,{' '}
+                  <span className="font-mono text-[#00B4D8]">/exports</span>
                 </p>
               </div>
             </div>
@@ -1299,14 +1504,39 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </button>
           </div>
 
+          {/* Build Versioning Strip */}
+          <div className="p-3.5 rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="space-y-0.5">
+              <div className="font-semibold text-slate-900 dark:text-white font-mono flex items-center gap-2">
+                <span>Build Versie: v{buildInfo.version}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#FF8F00]/20 text-[#FF8F00] font-mono">
+                  build# {buildInfo.buildNumber}
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                Formaat: <span className="font-mono">year.month.day.build#</span> — eerste build van
+                de dag heeft <span className="font-mono">build# = 0</span> ({buildInfo.date}),
+                volgende builds tonen <span className="font-mono">{buildInfo.date}.1</span>,{' '}
+                <span className="font-mono">{buildInfo.date}.2</span>, enz.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleBumpBuildVersion}
+              className="px-3 py-1.5 rounded-lg border border-[#FF8F00]/50 bg-[#FF8F00]/10 text-amber-900 dark:text-[#FF8F00] font-medium hover:bg-[#FF8F00]/20 transition-colors whitespace-nowrap shrink-0"
+            >
+              Simuleer Nieuwe Build (+1 build#)
+            </button>
+          </div>
+
           {/* Mode Selector */}
-          <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs">
+          <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-[#16181A] border border-slate-200 dark:border-[#3A3D40] rounded-lg text-xs">
             <button
               type="button"
               onClick={() => setDockhandMode('git_clone')}
               className={`flex-1 py-2 px-3 font-medium rounded-md transition-colors ${
                 dockhandMode === 'git_clone'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs border border-slate-200 dark:border-[#3A3D40]'
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
@@ -1317,7 +1547,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               onClick={() => setDockhandMode('git_build')}
               className={`flex-1 py-2 px-3 font-medium rounded-md transition-colors ${
                 dockhandMode === 'git_build'
-                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs border border-slate-200 dark:border-[#3A3D40]'
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
@@ -1335,8 +1565,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 type="text"
                 value={stackGitRepoUrl}
                 onChange={(e) => setStackGitRepoUrl(e.target.value)}
-                placeholder="https://github.com/gebruiker/spotisync-studio.git"
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                placeholder="https://github.com/gebruiker/mp3spot.git"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
             </div>
             <div>
@@ -1348,21 +1578,21 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 value={stackPort}
                 onChange={(e) => setStackPort(e.target.value)}
                 placeholder="3000"
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
             </div>
 
             {/* Volume Mapping Inputs */}
             <div>
               <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                Volume 1: Host Muziekmap (`:/music:ro`)
+                Volume 1: Host Muziekmap (`:/music:rw`)
               </label>
               <input
                 type="text"
                 value={stackMusicPath}
                 onChange={(e) => setStackMusicPath(e.target.value)}
                 placeholder="/mnt/nas/muziek"
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
             </div>
             <div>
@@ -1373,8 +1603,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 type="text"
                 value={stackDataPath}
                 onChange={(e) => setStackDataPath(e.target.value)}
-                placeholder="spotisync_data of ./data"
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                placeholder="mp3spot_data of ./data"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
             </div>
             <div>
@@ -1386,44 +1616,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 value={stackExportsPath}
                 onChange={(e) => setStackExportsPath(e.target.value)}
                 placeholder="./exports"
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
-            </div>
-
-            {/* Credentials Inputs */}
-            <div>
-              <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                Login Gebruikersnaam (`APP_USERNAME`)
-              </label>
-              <input
-                type="text"
-                value={stackUsername}
-                onChange={(e) => setStackUsername(e.target.value)}
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
-              />
-            </div>
-            <div>
-              <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                Gewenst Wachtwoord
-              </label>
-              <input
-                type="text"
-                value={stackPasswordInput}
-                onChange={(e) => setStackPasswordInput(e.target.value)}
-                placeholder="Typ een sterk wachtwoord..."
-                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
-              />
-            </div>
-            <div className="flex flex-col justify-end pb-1">
-              <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={useHashedPasswordInYaml}
-                  onChange={(e) => setUseHashedPasswordInYaml(e.target.checked)}
-                  className="rounded border-slate-400"
-                />
-                <span>Gebruik veilige SHA-256 Hash in YAML</span>
-              </label>
             </div>
           </div>
 
@@ -1436,26 +1630,26 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               <button
                 type="button"
                 onClick={() => copyToClipboard(generatedDockhandYaml, 'dockhand_yaml')}
-                className="px-3 py-1 rounded bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400 transition-colors"
+                className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold hover:brightness-110 transition-all shadow-sm"
               >
                 {copiedUrlKey === 'dockhand_yaml'
                   ? 'YAML Gekopieerd!'
                   : 'Kopieer Dockhand YAML'}
               </button>
             </div>
-            <pre className="p-4 rounded-lg bg-slate-950 text-slate-200 font-mono text-[11px] overflow-x-auto max-h-64 leading-relaxed border border-slate-800">
+            <pre className="p-4 rounded-lg bg-[#121416] text-[#E6E7E9] font-mono text-[11px] overflow-x-auto max-h-60 leading-relaxed border border-[#3A3D40]">
               {generatedDockhandYaml}
             </pre>
           </div>
 
-          <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+          <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-[#3A3D40] text-xs text-slate-500 dark:text-slate-400">
             <span>
               Zie ook `README.md` in de hoofdmap voor de volledige GitHub- en volume-documentatie.
             </span>
             <button
               type="button"
               onClick={() => setShowDockhandModal(false)}
-              className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-medium"
+              className="px-4 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 font-medium hover:border-[#FF8F00] transition-colors"
             >
               Sluiten
             </button>
@@ -1465,144 +1659,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
     );
   };
 
-  // ============================================================================
-  // LOGIN SCREEN (Shown when not authenticated)
-  // ============================================================================
-  if (!isCheckingAuth && !appAuthStatus.authenticated) {
-    return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col justify-between p-6">
-        <div className="max-w-5xl w-full mx-auto flex items-center justify-between">
-          <span className="text-lg font-bold tracking-tight font-display">
-            SpotiSync Studio
-          </span>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setShowDockhandModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-emerald-500 transition-colors"
-            >
-              <Server className="w-3.5 h-3.5 text-emerald-500" />
-              <span>Dockhand Stack YAML</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setDarkMode((d) => !d)}
-              className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400"
-              aria-label="Wissel thema"
-            >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        <div className="max-w-md w-full mx-auto border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-slate-900 p-6 sm:p-8 space-y-6">
-          <div className="space-y-1.5">
-            <div className="inline-flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-              <Lock className="w-3.5 h-3.5" />
-              <span>Beveiligde Toegang</span>
-            </div>
-            <h1 className="text-xl font-bold text-slate-900 dark:text-white font-display">
-              Inloggen bij SpotiSync Studio
-            </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              Meld je aan met de inloggegevens uit je{' '}
-              <span className="font-mono">docker-compose.yml</span> (
-              <span className="font-mono">APP_USERNAME</span> en{' '}
-              <span className="font-mono">APP_PASSWORD</span> of{' '}
-              <span className="font-mono">APP_PASSWORD_HASH</span>).
-            </p>
-          </div>
-
-          {appAuthStatus.usingDefaultCredentials && (
-            <div className="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-800 dark:text-amber-200 space-y-2">
-              <div className="font-semibold">Standaard preview-wachtwoord actief</div>
-              <p className="text-[11px] leading-relaxed opacity-90">
-                Er is nog geen eigen <span className="font-mono">APP_PASSWORD</span> of{' '}
-                <span className="font-mono">APP_PASSWORD_HASH</span> ingesteld. Gebruik{' '}
-                <span className="font-mono font-semibold">admin</span> /{' '}
-                <span className="font-mono font-semibold">spotisync</span> om in te loggen.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginUsername('admin');
-                  setLoginPassword('spotisync');
-                }}
-                className="px-2.5 py-1 text-[11px] font-semibold rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-100 transition-colors"
-              >
-                Vul standaard inloggegevens in
-              </button>
-            </div>
-          )}
-
-          {loginError && (
-            <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-600 dark:text-rose-300">
-              {loginError}
-            </div>
-          )}
-
-          <form onSubmit={handleAppLogin} className="space-y-4 text-xs">
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                Gebruikersnaam
-              </label>
-              <input
-                type="text"
-                required
-                autoComplete="username"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-
-            <div>
-              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                Wachtwoord
-              </label>
-              <input
-                type="password"
-                required
-                autoComplete="current-password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                placeholder="Voer je wachtwoord in..."
-                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={isLoggingIn}
-              className="w-full py-2.5 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold transition-colors"
-            >
-              {isLoggingIn ? 'Bezig met aanmelden...' : 'Inloggen'}
-            </button>
-          </form>
-
-          <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-            <span>Beveiliging: {appAuthStatus.authMode}</span>
-            <button
-              type="button"
-              onClick={() => setShowDockhandModal(true)}
-              className="text-emerald-600 dark:text-emerald-400 hover:underline font-medium"
-            >
-              Genereer Dockhand YAML & Volumes
-            </button>
-          </div>
-        </div>
-
-        <footer className="max-w-5xl w-full mx-auto text-center text-xs text-slate-500 dark:text-slate-500">
-          SpotiSync Studio · Lokale Muziekbibliotheek & Spotify Synchronisatie
-        </footer>
-
-        {renderDockhandModal()}
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-[#F0F2F4] dark:bg-[#16181A] text-slate-900 dark:text-[#E6E7E9] flex flex-col">
       {/* Hidden File & Directory Inputs */}
       <input
         ref={fileInputRef}
@@ -1622,27 +1680,30 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
       />
 
       {/* Top Bar Contract: Strictly 3 zones separated by gap-8 */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 z-30">
-        {/* Zone 1: Single text element wordmark */}
+      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#1F2225] sticky top-0 z-30">
+        {/* Zone 1: Single brand anchor with icon and wordmark */}
         <a
           href="#bibliotheek"
           onClick={(e) => {
             e.preventDefault();
             setActiveTab('library');
           }}
-          className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0 font-display"
+          className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 font-display hover:opacity-90 transition-opacity"
         >
-          SpotiSync Studio
+          <MP3SpotIcon size={28} />
+          <span>
+            MP3<span className="text-[#FF8F00]">Spot</span>
+          </span>
         </a>
 
         {/* Zone 2: 4 concise single-line text navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-300">
           <button
             type="button"
             onClick={() => setActiveTab('library')}
-            className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
               activeTab === 'library'
-                ? 'text-slate-900 dark:text-white border-emerald-500'
+                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
                 : 'border-transparent'
             }`}
           >
@@ -1651,9 +1712,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           <button
             type="button"
             onClick={() => setActiveTab('matcher')}
-            className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
               activeTab === 'matcher'
-                ? 'text-slate-900 dark:text-white border-emerald-500'
+                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
                 : 'border-transparent'
             }`}
           >
@@ -1662,9 +1723,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           <button
             type="button"
             onClick={() => setActiveTab('playlists')}
-            className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
               activeTab === 'playlists'
-                ? 'text-slate-900 dark:text-white border-emerald-500'
+                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
                 : 'border-transparent'
             }`}
           >
@@ -1673,9 +1734,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           <button
             type="button"
             onClick={() => setActiveTab('sync')}
-            className={`hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
               activeTab === 'sync'
-                ? 'text-slate-900 dark:text-white border-emerald-500'
+                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
                 : 'border-transparent'
             }`}
           >
@@ -1693,7 +1754,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 handleRunDifferentialSync();
               }}
               disabled={isSyncing}
-              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-emerald-500 rounded-lg hover:bg-emerald-400 transition-colors whitespace-nowrap shrink-0"
+              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-xl hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-md cursor-pointer"
             >
               {isSyncing
                 ? 'Synchroniseren...'
@@ -1703,7 +1764,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             <button
               type="button"
               onClick={handleConnectSpotify}
-              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-emerald-500 rounded-lg hover:bg-emerald-400 transition-colors whitespace-nowrap shrink-0"
+              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-xl hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-md cursor-pointer"
             >
               Verbind Spotify
             </button>
@@ -1749,10 +1810,10 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               <button
                 type="button"
                 onClick={() => folderInputRef.current?.click()}
-                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#1E2124] hover:bg-slate-100 dark:hover:bg-[#25282C] text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
               >
                 <span className="flex items-center gap-2 truncate">
-                  <FolderOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <FolderOpen className="w-4 h-4 text-[#FF8F00] shrink-0" />
                   <span>Scan Browser Map</span>
                 </span>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -1760,18 +1821,30 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               <button
                 type="button"
                 onClick={handleScanServerVolume}
-                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#1E2124] hover:bg-slate-100 dark:hover:bg-[#25282C] text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
               >
                 <span className="flex items-center gap-2 truncate">
-                  <HardDrive className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <HardDrive className="w-4 h-4 text-[#00B4D8] shrink-0" />
                   <span>Scan Docker Volume (/music)</span>
                 </span>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               </button>
               <button
                 type="button"
+                onClick={() => handleWriteSpotifyId3Tags()}
+                disabled={isWritingId3}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-[#D84315]/40 bg-[#D84315]/10 hover:bg-[#D84315]/20 text-[#D84315] dark:text-[#FF8F00] transition-colors whitespace-nowrap"
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <Tag className="w-4 h-4 text-[#D84315] dark:text-[#FF8F00] shrink-0" />
+                  <span>{isWritingId3 ? 'ID3 Schrijven...' : 'Schrijf Spotify ID3 Tags'}</span>
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-[#FF8F00] shrink-0" />
+              </button>
+              <button
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#1E2124] hover:bg-slate-100 dark:hover:bg-[#25282C] text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
               >
                 <span className="flex items-center gap-2 truncate">
                   <Upload className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
@@ -1797,8 +1870,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
                   selectedFolder === 'ALL'
-                    ? 'bg-slate-900 text-white dark:bg-slate-800 dark:text-white font-medium'
-                    : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                    ? 'bg-slate-900 text-white dark:bg-[#3A3D40] dark:text-[#E6E7E9] font-medium'
+                    : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#25282C]'
                 }`}
               >
                 <span className="truncate">Alle Lokale Mappen</span>
@@ -1822,8 +1895,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
                       active
-                        ? 'bg-slate-900 text-white dark:bg-slate-800 dark:text-white font-medium'
-                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                        ? 'bg-slate-900 text-white dark:bg-[#3A3D40] dark:text-[#E6E7E9] font-medium'
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#25282C]'
                     }`}
                   >
                     <span className="truncate">{shortName}</span>
@@ -1835,10 +1908,10 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               })}
             </div>
 
-            {/* Smart Playlists Sidebar List */}
+            {/* Smart Playlists Sidebar List (including automatic Year Playlists) */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
-                <span>Slimme Afspeellijsten</span>
+                <span>Slimme & Jaar-Lijsten</span>
                 <span className="font-mono tabular-nums">{evaluatedPlaylists.length}</span>
               </div>
               {evaluatedPlaylists.map((ep) => {
@@ -1854,8 +1927,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
                       isSelected
-                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-medium'
-                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/50'
+                        ? 'bg-[#FF8F00]/15 text-amber-900 dark:text-[#FF8F00] font-medium'
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#25282C]'
                     }`}
                   >
                     <span className="truncate">{ep.rule.name}</span>
@@ -1868,12 +1941,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </div>
           </div>
 
-          {/* Bottom Sidebar Controls: Dockhand & Volume Config, Spotify OAuth & Logout */}
-          <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+          {/* Bottom Sidebar Controls: Dockhand & Volume Config, Build Version, Spotify OAuth & Logout */}
+          <div className="pt-4 border-t border-slate-200 dark:border-[#3A3D40] space-y-3">
             <button
               type="button"
               onClick={() => setShowDockhandModal(true)}
-              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium rounded-lg border border-[#FF8F00]/40 bg-[#FF8F00]/10 text-amber-900 dark:text-[#FF8F00] hover:bg-[#FF8F00]/20 transition-colors"
             >
               <span className="flex items-center gap-2 truncate">
                 <Server className="w-3.5 h-3.5 shrink-0" />
@@ -1883,7 +1956,10 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </button>
 
             <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 space-y-0.5">
-              <div>Volume 1: {appAuthStatus.musicLibraryPath} (:ro)</div>
+              <div className="text-slate-700 dark:text-slate-300 font-semibold">
+                Build: v{buildInfo.version} (build# {buildInfo.buildNumber})
+              </div>
+              <div>Volume 1: {appAuthStatus.musicLibraryPath} (:rw ID3)</div>
               <div>Volume 2: {appAuthStatus.dataPath || '/app/data'} (:rw)</div>
               <div>Volume 3: {appAuthStatus.exportsPath || '/exports'} (:rw)</div>
             </div>
@@ -1896,7 +1972,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 <button
                   type="button"
                   onClick={() => setShowOAuthModal(true)}
-                  className="text-emerald-600 dark:text-emerald-400 hover:underline text-[11px] font-medium whitespace-nowrap"
+                  className="text-[#00B4D8] hover:underline text-[11px] font-medium whitespace-nowrap"
                 >
                   OAuth Instellingen
                 </button>
@@ -1920,7 +1996,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   <button
                     type="button"
                     onClick={() => setShowOAuthModal(true)}
-                    className="underline hover:text-slate-800 dark:hover:text-slate-200"
+                    className="underline text-[#00B4D8] hover:opacity-80"
                   >
                     Configureer API
                   </button>
@@ -1928,33 +2004,23 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               )}
             </div>
 
-            <div className="flex items-center justify-between pt-2">
+            <div className="pt-2">
               <button
                 type="button"
                 onClick={() => setDarkMode((d) => !d)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-md border border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
               >
                 {darkMode ? (
                   <>
                     <Sun className="w-3.5 h-3.5" />
-                    <span>Licht</span>
+                    <span>Licht Thema</span>
                   </>
                 ) : (
                   <>
                     <Moon className="w-3.5 h-3.5" />
-                    <span>Donker</span>
+                    <span>Donker Thema</span>
                   </>
                 )}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleAppLogout}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors whitespace-nowrap"
-                title={`Uitloggen (${appAuthStatus.username})`}
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Uitloggen</span>
               </button>
             </div>
           </div>
@@ -1967,17 +2033,17 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             <div
               className={`flex items-center justify-between gap-4 px-4 py-3 rounded-lg border text-xs ${
                 noticeBanner.type === 'success'
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-200'
+                  ? 'bg-[#FF8F00]/10 border-[#FF8F00]/30 text-amber-900 dark:text-[#FF8F00]'
                   : noticeBanner.type === 'warning'
-                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-200'
-                  : 'bg-slate-200/70 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200'
+                  ? 'bg-[#D84315]/10 border-[#D84315]/30 text-[#D84315] dark:text-[#FF8F00]'
+                  : 'bg-slate-200/70 dark:bg-[#1E2124] border-slate-300 dark:border-[#3A3D40] text-slate-800 dark:text-[#E6E7E9]'
               }`}
             >
               <div className="flex items-center gap-2.5">
                 {noticeBanner.type === 'success' ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <CheckCircle2 className="w-4 h-4 text-[#FF8F00] shrink-0" />
                 ) : (
-                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <AlertTriangle className="w-4 h-4 text-[#D84315] shrink-0" />
                 )}
                 <span>{noticeBanner.message}</span>
               </div>
@@ -1994,14 +2060,14 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
 
           {/* Live File Scanning Progress */}
           {isScanningFiles && (
-            <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-800 dark:text-emerald-200">
-              <RefreshCw className="w-4 h-4 animate-spin shrink-0 text-emerald-500" />
+            <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-[#FF8F00]/30 bg-[#FF8F00]/10 text-xs text-amber-900 dark:text-[#FF8F00]">
+              <RefreshCw className="w-4 h-4 animate-spin shrink-0 text-[#FF8F00]" />
               <span className="font-mono tabular-nums">{scanProgressText}</span>
             </div>
           )}
 
           {/* KPI Metric Strip — Single-elevation hairline grid with tabular numerals */}
-          <section className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-slate-800">
+          <section className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-[#3A3D40]">
             <div className="p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">
                 Lokale Muziekbestanden
@@ -2017,27 +2083,27 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </div>
             <div className="p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                Spotify Catalogus Match
+                Spotify Match & ID3 Getagd
               </div>
               <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+                <span className="text-2xl font-bold font-mono tabular-nums text-[#FF8F00]">
                   {metrics.matchRatePct}%
                 </span>
                 <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  {metrics.exactOrSynced} bevestigd
+                  {metrics.id3TaggedCount} ID3v2.3 getagd
                 </span>
               </div>
             </div>
             <div className="p-4">
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                Handmatige Controle
+                Automatische Jaar-Lijsten
               </div>
               <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-amber-600 dark:text-amber-400">
-                  {metrics.reviewCount}
+                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                  {yearStats.length}
                 </span>
                 <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  {metrics.unmatchedCount} onbekend
+                  jaren in Spotify
                 </span>
               </div>
             </div>
@@ -2046,7 +2112,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 Klaar voor Synchronisatie
               </div>
               <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                <span className="text-2xl font-bold font-mono tabular-nums text-[#00B4D8]">
                   {totalPendingSyncTracks}
                 </span>
                 <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
@@ -2057,7 +2123,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           </section>
 
           {/* ===================================================================
-              VIEW 1: LOKALE BIBLIOTHEEK & METADATA SCANNER
+              VIEW 1: LOKALE BIBLIOTHEEK, SPOTIFY ID3 TAGGER & SCANNER
              =================================================================== */}
           {activeTab === 'library' && (
             <div className="space-y-6">
@@ -2068,42 +2134,53 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   e.preventDefault();
                   handleFilesSelected(e.dataTransfer.files);
                 }}
-                className="border border-dashed border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900/50 p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
+                className="border border-dashed border-slate-300 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124]/50 p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
               >
                 <div className="space-y-1">
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Lokale Muziekbibliotheek & Docker Volume Scanner
+                    MP3Spot Bibliotheek, Spotify ID3v2.3 Tagger & Jaar-Indeling
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 max-w-2xl">
-                    Sleep je lokale muziekmap hierheen of scan direct het gemounte Docker-volume (
-                    <span className="font-mono">{appAuthStatus.musicLibraryPath}</span>). Leest{' '}
-                    <span className="font-mono">ID3v2.4</span>,{' '}
-                    <span className="font-mono">FLAC Vorbis</span>,{' '}
-                    <span className="font-mono">ISRC</span> en{' '}
-                    <span className="font-mono">.M3U8</span> en slaat de status op in{' '}
-                    <span className="font-mono">{appAuthStatus.dataPath || '/app/data'}</span>.
+                    Sleep je lokale muziekmap hierheen of scan het gemounte Docker-volume (
+                    <span className="font-mono text-[#00B4D8]">{appAuthStatus.musicLibraryPath}</span>). MP3Spot
+                    schrijft Spotify metadata (<span className="font-mono">TIT2</span>,{' '}
+                    <span className="font-mono">TPE1</span>, <span className="font-mono">TALB</span>,{' '}
+                    <span className="font-mono">TYER</span>, <span className="font-mono">TSRC</span>)
+                    terug als ID3v2.3 tags en plaatst elk gevonden nummer automatisch in een{' '}
+                    <span className="font-mono text-[#FF8F00]">MP3Spot Jaar: YYYY</span> afspeellijst.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                   <button
                     type="button"
                     onClick={() => folderInputRef.current?.click()}
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 hover:opacity-90 transition-opacity whitespace-nowrap shrink-0"
+                    className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-900 text-white dark:bg-[#E6E7E9] dark:text-[#16181A] hover:opacity-90 transition-opacity whitespace-nowrap shrink-0"
                   >
                     Selecteer Browser Map
                   </button>
                   <button
                     type="button"
                     onClick={handleScanServerVolume}
-                    className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-[#E6E7E9] hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors whitespace-nowrap shrink-0"
                   >
-                    Scan Docker Volume (/music)
+                    Scan /music Volume
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleWriteSpotifyId3Tags()}
+                    disabled={isWritingId3}
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-sm cursor-pointer disabled:opacity-50"
+                  >
+                    <Tag className="w-3.5 h-3.5" />
+                    <span>
+                      {isWritingId3 ? 'ID3 Schrijven...' : 'Tag Alle met Spotify ID3'}
+                    </span>
                   </button>
                   <button
                     type="button"
                     onClick={() => runBatchMatcher()}
                     disabled={isBatchMatching}
-                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 transition-colors whitespace-nowrap shrink-0"
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-[#00B4D8]/40 text-[#00B4D8] hover:bg-[#00B4D8]/10 transition-colors whitespace-nowrap shrink-0"
                   >
                     <RefreshCw
                       className={`w-3.5 h-3.5 ${isBatchMatching ? 'animate-spin' : ''}`}
@@ -2115,7 +2192,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
 
               {/* Filter & Search Toolbar */}
               <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-                <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-x-auto">
+                <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-[#16181A] border border-slate-200 dark:border-[#3A3D40] rounded-lg overflow-x-auto">
                   {(
                     [
                       ['ALL', `Alle (${tracks.length})`],
@@ -2147,7 +2224,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       onClick={() => setStatusFilter(st)}
                       className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                         statusFilter === st
-                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                          ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs border border-slate-200 dark:border-[#3A3D40]'
                           : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                       }`}
                     >
@@ -2163,15 +2240,15 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Zoek op titel, artiest, ISRC, map..."
-                      className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+                      placeholder="Zoek op titel, artiest, jaar, ISRC..."
+                      className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                     />
                   </div>
                   <select
                     value={formatFilter}
                     onChange={(e) => setFormatFilter(e.target.value)}
                     aria-label="Filter op audioformaat"
-                    className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                    className="px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#16181A] text-slate-700 dark:text-slate-200 focus:outline-none focus:border-[#FF8F00]"
                   >
                     <option value="ALL">Alle formaten</option>
                     <option value="FLAC">FLAC</option>
@@ -2183,20 +2260,20 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
 
               {/* High-Density Local Library Data Table */}
-              <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
+              <div className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-500 dark:text-slate-400 bg-slate-50/60 dark:bg-slate-900/80">
+                      <tr className="border-b border-slate-200 dark:border-[#3A3D40] text-[11px] font-semibold text-slate-500 dark:text-slate-400 bg-slate-50/60 dark:bg-[#16181A]">
                         <th className="py-2.5 px-4">Titel & Artiest (Lokaal Bestand)</th>
-                        <th className="py-2.5 px-4">Album & Genre Metadata</th>
-                        <th className="py-2.5 px-4">Audio Specs</th>
+                        <th className="py-2.5 px-4">Album, Genre & Jaar-Lijst</th>
+                        <th className="py-2.5 px-4">ID3 Tag Status & Specs</th>
                         <th className="py-2.5 px-4 text-right">Speelduur</th>
                         <th className="py-2.5 px-4">Spotify Match & URI</th>
                         <th className="py-2.5 px-4 text-right">Acties</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80 text-xs">
+                    <tbody className="divide-y divide-slate-200 dark:divide-[#3A3D40]/80 text-xs">
                       {filteredTracks.length === 0 ? (
                         <tr>
                           <td
@@ -2209,9 +2286,10 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       ) : (
                         filteredTracks.map((trk) => {
                           const isEditing = editingTrackId === trk.id;
+                          const effectiveYear = trk.selectedMatch?.releaseYear || trk.year;
                           return (
                             <React.Fragment key={trk.id}>
-                              <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
+                              <tr className="hover:bg-slate-50/80 dark:hover:bg-[#25282C] transition-colors">
                                 <td className="py-3 px-4 max-w-xs">
                                   <div className="font-semibold text-slate-900 dark:text-slate-100 truncate">
                                     {trk.title}
@@ -2231,19 +2309,15 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                   <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 whitespace-nowrap">
                                     <span>{trk.genre}</span>
                                     <span aria-hidden="true">·</span>
-                                    <span className="font-mono tabular-nums">{trk.year}</span>
+                                    <span className="font-mono tabular-nums font-medium text-[#FF8F00]">
+                                      Jaar: {effectiveYear}
+                                    </span>
                                     {trk.bpm && (
                                       <>
                                         <span aria-hidden="true">·</span>
                                         <span className="font-mono tabular-nums">
                                           {trk.bpm} BPM
                                         </span>
-                                      </>
-                                    )}
-                                    {trk.musicalKey && (
-                                      <>
-                                        <span aria-hidden="true">·</span>
-                                        <span className="font-mono">{trk.musicalKey}</span>
                                       </>
                                     )}
                                   </div>
@@ -2253,8 +2327,14 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                   <div className="text-xs font-mono tabular-nums text-slate-800 dark:text-slate-200">
                                     {trk.format} · {trk.bitrateKbps} kbps
                                   </div>
-                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                                    {trk.tagSource}
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
+                                    {trk.id3TaggedFromSpotify ? (
+                                      <span className="text-[#00B4D8] font-medium">
+                                        Spotify ID3v2.3
+                                      </span>
+                                    ) : (
+                                      <span>{trk.tagSource}</span>
+                                    )}
                                     {trk.isrc ? ` · ${trk.isrc}` : ''}
                                   </div>
                                 </td>
@@ -2268,21 +2348,21 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                     <div>
                                       <div className="flex items-center gap-1.5">
                                         {trk.matchStatus === 'synced' ? (
-                                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                                          <CheckCircle2 className="w-3.5 h-3.5 text-[#FF8F00] shrink-0" />
                                         ) : trk.matchStatus === 'matched' ? (
-                                          <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                                          <Check className="w-3.5 h-3.5 text-[#FF8F00] shrink-0" />
                                         ) : (
                                           <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                                         )}
                                         <span className="font-medium text-slate-900 dark:text-slate-100 truncate max-w-[180px]">
                                           {trk.selectedMatch.title}
                                         </span>
-                                        <span className="font-mono tabular-nums text-[11px] text-emerald-600 dark:text-emerald-400">
+                                        <span className="font-mono tabular-nums text-[11px] text-[#FF8F00]">
                                           {trk.selectedMatch.confidence}%
                                         </span>
                                       </div>
-                                      <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-[220px] mt-0.5">
-                                        {trk.selectedMatch.matchMethod} · {trk.selectedMatch.uri}
+                                      <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-[240px] mt-0.5">
+                                        Lijst: MP3Spot Jaar: {effectiveYear} · <span className="text-[#00B4D8]">{trk.selectedMatch.uri}</span>
                                       </div>
                                     </div>
                                   ) : (
@@ -2294,7 +2374,27 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                 </td>
 
                                 <td className="py-3 px-4 text-right whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-2">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    {trk.selectedMatch && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleWriteSpotifyId3Tags([trk])}
+                                        title="Schrijf Spotify ID3v2.3 metadata naar lokaal bestand"
+                                        className="px-2.5 py-1 text-[11px] font-medium rounded border border-[#FF8F00]/40 text-amber-900 dark:text-[#FF8F00] hover:bg-[#FF8F00]/10 transition-colors"
+                                      >
+                                        Tag ID3
+                                      </button>
+                                    )}
+                                    {trk.selectedMatch && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDownloadBinaryId3File(trk)}
+                                        title="Download binair ID3v2.3 getagd audiobestand"
+                                        className="p-1 text-slate-500 hover:text-slate-900 dark:hover:text-white rounded border border-slate-200 dark:border-[#3A3D40]"
+                                      >
+                                        <Download className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -2313,9 +2413,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                           });
                                         }
                                       }}
-                                      className="px-2.5 py-1 text-[11px] font-medium rounded border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                      className="px-2.5 py-1 text-[11px] font-medium rounded border border-slate-200 dark:border-[#3A3D40] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors"
                                     >
-                                      Bewerk Tags
+                                      Bewerk
                                     </button>
                                     <button
                                       type="button"
@@ -2324,7 +2424,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                         setManualSearchTrackId(trk.id);
                                         setManualSearchQuery(`${trk.artist} - ${trk.title}`);
                                       }}
-                                      className="px-2.5 py-1 text-[11px] font-medium rounded border border-slate-200 dark:border-slate-700 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                                      className="px-2.5 py-1 text-[11px] font-medium rounded border border-[#00B4D8]/40 text-[#00B4D8] hover:bg-[#00B4D8]/10 transition-colors"
                                     >
                                       Koppel
                                     </button>
@@ -2333,12 +2433,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                               </tr>
 
                               {isEditing && (
-                                <tr className="bg-slate-100/70 dark:bg-slate-800/60">
-                                  <td colSpan={6} className="p-4">
+                                <tr className="bg-slate-100/70 dark:bg-[#16181A]">
+                                  <td colSpan={6} className="p-4 border-t border-[#3A3D40]">
                                     <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                       <div>
                                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                                          Titel
+                                          Titel (TIT2)
                                         </label>
                                         <input
                                           type="text"
@@ -2346,12 +2446,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                           onChange={(e) =>
                                             setEditDraft((d) => ({ ...d, title: e.target.value }))
                                           }
-                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124]"
                                         />
                                       </div>
                                       <div>
                                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                                          Artiest
+                                          Artiest (TPE1)
                                         </label>
                                         <input
                                           type="text"
@@ -2359,12 +2459,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                           onChange={(e) =>
                                             setEditDraft((d) => ({ ...d, artist: e.target.value }))
                                           }
-                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124]"
                                         />
                                       </div>
                                       <div>
                                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                                          Album
+                                          Album (TALB)
                                         </label>
                                         <input
                                           type="text"
@@ -2372,25 +2472,28 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                           onChange={(e) =>
                                             setEditDraft((d) => ({ ...d, album: e.target.value }))
                                           }
-                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124]"
                                         />
                                       </div>
                                       <div>
                                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                                          Genre
+                                          Jaar (TYER)
                                         </label>
                                         <input
-                                          type="text"
-                                          value={editDraft.genre || ''}
+                                          type="number"
+                                          value={editDraft.year || ''}
                                           onChange={(e) =>
-                                            setEditDraft((d) => ({ ...d, genre: e.target.value }))
+                                            setEditDraft((d) => ({
+                                              ...d,
+                                              year: Number(e.target.value) || 2024,
+                                            }))
                                           }
-                                          className="w-full px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                          className="w-full px-2.5 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124]"
                                         />
                                       </div>
                                       <div>
                                         <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">
-                                          ISRC-code
+                                          ISRC-code (TSRC)
                                         </label>
                                         <input
                                           type="text"
@@ -2399,21 +2502,21 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                             setEditDraft((d) => ({ ...d, isrc: e.target.value }))
                                           }
                                           placeholder="bijv. NLB631700084"
-                                          className="w-full px-2.5 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                                          className="w-full px-2.5 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124]"
                                         />
                                       </div>
                                       <div className="flex items-end gap-2">
                                         <button
                                           type="button"
                                           onClick={() => handleSaveTrackEdit(trk.id)}
-                                          className="px-3 py-1.5 text-xs font-semibold rounded bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
+                                          className="px-3 py-1.5 text-xs font-bold rounded bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-xs cursor-pointer"
                                         >
                                           Opslaan & Herzoek
                                         </button>
                                         <button
                                           type="button"
                                           onClick={() => setEditingTrackId(null)}
-                                          className="px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400"
+                                          className="px-2.5 py-1.5 text-xs rounded border border-slate-300 dark:border-[#3A3D40] text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-[#25282C]"
                                         >
                                           Annuleer
                                         </button>
@@ -2434,26 +2537,35 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           )}
 
           {/* ===================================================================
-              VIEW 2: SPOTIFY MATCHER & CONFLICTRESOLUTIE
+              VIEW 2: SPOTIFY MATCHER, ID3 SCHRIJVER & CONFLICTRESOLUTIE
              =================================================================== */}
           {activeTab === 'matcher' && (
             <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Spotify Metadata Matcher & Versiebeheer
+                    Spotify Metadata Matcher & ID3v2.3 Tagger
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                    Controleer twijfelgevallen (zoals Extended Mixes vs. Radio Edits of vinyl-rips)
-                    en kies de juiste Spotify Track URI.
+                    Koppel lokale bestanden aan Spotify en schrijf direct de officiële Spotify ID3
+                    metadata (Titel, Artiest, Album, Releasejaar & ISRC) naar je lokale bestanden.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
+                    onClick={() => handleWriteSpotifyId3Tags()}
+                    disabled={isWritingId3}
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer disabled:opacity-50"
+                  >
+                    <Tag className="w-3.5 h-3.5" />
+                    <span>Tag Alle Gematchte Bestanden met Spotify ID3</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => runBatchMatcher()}
                     disabled={isBatchMatching}
-                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 hover:opacity-90 transition-opacity whitespace-nowrap"
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-[#00B4D8]/40 text-[#00B4D8] hover:bg-[#00B4D8]/10 transition-colors whitespace-nowrap"
                   >
                     <RefreshCw
                       className={`w-3.5 h-3.5 ${isBatchMatching ? 'animate-spin' : ''}`}
@@ -2464,11 +2576,11 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
 
               {manualSearchTrackId && (
-                <div className="border border-emerald-500/40 rounded-lg bg-white dark:bg-slate-900 p-4 space-y-3">
+                <div className="border border-[#FF8F00]/40 rounded-lg bg-white dark:bg-[#1E2124] p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-slate-900 dark:text-white">
                       Handmatig Zoeken in Spotify Catalogus voor:{' '}
-                      <span className="text-emerald-600 dark:text-emerald-400">
+                      <span className="text-[#FF8F00]">
                         {tracks.find((t) => t.id === manualSearchTrackId)?.fileName}
                       </span>
                     </span>
@@ -2489,18 +2601,18 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       value={manualSearchQuery}
                       onChange={(e) => setManualSearchQuery(e.target.value)}
                       placeholder="Zoek op Artiest - Titel of ISRC..."
-                      className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                     />
                     <button
                       type="submit"
                       disabled={isSearchingManual}
-                      className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
+                      className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer disabled:opacity-50"
                     >
                       {isSearchingManual ? 'Zoeken...' : 'Zoek in Spotify'}
                     </button>
                   </form>
                   {manualSearchResults.length > 0 && (
-                    <div className="divide-y divide-slate-200 dark:divide-slate-800 border-t border-slate-200 dark:border-slate-800 pt-2">
+                    <div className="divide-y divide-slate-200 dark:divide-[#3A3D40] border-t border-slate-200 dark:border-[#3A3D40] pt-2">
                       {manualSearchResults.map((cand) => (
                         <div
                           key={cand.spotifyId}
@@ -2512,7 +2624,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                             </div>
                             <div className="text-[11px] text-slate-500 font-mono">
                               {cand.album} · {cand.releaseYear} · {formatDuration(cand.durationSec)}{' '}
-                              · {cand.uri}
+                              · <span className="text-[#00B4D8]">{cand.uri}</span>
                             </div>
                           </div>
                           <button
@@ -2526,9 +2638,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                               setManualSearchTrackId(null);
                               setManualSearchResults([]);
                             }}
-                            className="px-3 py-1.5 text-xs font-semibold rounded bg-emerald-500 text-slate-950 hover:bg-emerald-400 whitespace-nowrap"
+                            className="px-3 py-1.5 text-xs font-bold rounded bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 whitespace-nowrap shadow-xs"
                           >
-                            Kies Deze Match
+                            Kies Match & Tag ID3
                           </button>
                         </div>
                       ))}
@@ -2537,16 +2649,17 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 </div>
               )}
 
-              <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 divide-y divide-slate-200 dark:divide-slate-800">
+              <div className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] divide-y divide-slate-200 dark:divide-[#3A3D40]">
                 {tracks.map((trk) => {
                   const durationDelta = trk.selectedMatch
                     ? Math.abs(trk.durationSec - trk.selectedMatch.durationSec)
                     : 0;
+                  const effectiveYear = trk.selectedMatch?.releaseYear || trk.year;
 
                   return (
                     <div
                       key={trk.id}
-                      className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                      className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 hover:bg-slate-50/50 dark:hover:bg-[#25282C] transition-colors"
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 text-xs">
@@ -2556,7 +2669,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         </div>
                         <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono mt-1">
                           Lokaal: {trk.format} · {formatDuration(trk.durationSec)} · Album:{' '}
-                          {trk.album} {trk.isrc ? `· ISRC: ${trk.isrc}` : ''}
+                          {trk.album} · Tags: {trk.tagSource}{' '}
+                          {trk.isrc ? `· ISRC: ${trk.isrc}` : ''}
                         </div>
                       </div>
 
@@ -2564,15 +2678,15 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         {trk.selectedMatch ? (
                           <div className="space-y-1">
                             <div className="flex items-center gap-2 text-xs">
-                              <span className="font-medium text-emerald-700 dark:text-emerald-400 truncate">
+                              <span className="font-medium text-[#00B4D8] truncate">
                                 Spotify: {trk.selectedMatch.artist} — {trk.selectedMatch.title}
                               </span>
-                              <span className="font-mono tabular-nums text-[11px] text-slate-500">
+                              <span className="font-mono tabular-nums text-[11px] text-[#FF8F00]">
                                 ({trk.selectedMatch.confidence}% · {trk.selectedMatch.matchMethod})
                               </span>
                             </div>
                             <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
-                              URI: {trk.selectedMatch.uri} · Speelduur:{' '}
+                              Jaar-lijst: <span className="text-[#FF8F00]">MP3Spot Jaar: {effectiveYear}</span> · Speelduur:{' '}
                               {formatDuration(trk.selectedMatch.durationSec)}
                               {durationDelta > 5
                                 ? ` (Δ ${durationDelta}s t.o.v. lokaal bestand)`
@@ -2592,8 +2706,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                       onClick={() => handleSelectCandidate(trk.id, cand)}
                                       className={`px-2 py-0.5 text-[11px] rounded border transition-colors font-mono ${
                                         isCurrent
-                                          ? 'border-emerald-500 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 font-medium'
-                                          : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-400'
+                                          ? 'border-[#FF8F00] bg-[#FF8F00]/15 text-[#FF8F00] font-medium'
+                                          : 'border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-400 hover:border-slate-400'
                                       }`}
                                     >
                                       {cand.title} ({formatDuration(cand.durationSec)})
@@ -2612,11 +2726,20 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
+                        {trk.selectedMatch && (
+                          <button
+                            type="button"
+                            onClick={() => handleWriteSpotifyId3Tags([trk])}
+                            className="px-3 py-1.5 text-xs font-medium rounded-md border border-[#FF8F00]/40 text-amber-900 dark:text-[#FF8F00] hover:bg-[#FF8F00]/10 transition-colors whitespace-nowrap"
+                          >
+                            Schrijf Spotify ID3
+                          </button>
+                        )}
                         {trk.matchStatus === 'review' && trk.selectedMatch && (
                           <button
                             type="button"
                             onClick={() => handleSelectCandidate(trk.id, trk.selectedMatch!)}
-                            className="px-3 py-1.5 text-xs font-semibold rounded-md bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
+                            className="px-3 py-1.5 text-xs font-bold rounded-md bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-xs"
                           >
                             Bevestig Match
                           </button>
@@ -2627,7 +2750,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                             setManualSearchTrackId(trk.id);
                             setManualSearchQuery(`${trk.artist} ${trk.title}`);
                           }}
-                          className="px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                          className="px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-[#3A3D40] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors whitespace-nowrap"
                         >
                           Handmatig Zoeken
                         </button>
@@ -2636,7 +2759,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                             href={trk.selectedMatch.externalUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-slate-900 dark:hover:text-white transition-colors"
+                            className="p-1.5 rounded-md border border-slate-200 dark:border-[#3A3D40] text-[#00B4D8] hover:text-white hover:bg-[#00B4D8]/20 transition-colors"
                             title="Openen in Spotify"
                           >
                             <ExternalLink className="w-3.5 h-3.5" />
@@ -2651,32 +2774,41 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           )}
 
           {/* ===================================================================
-              VIEW 3: SLIMME AFSPEELLIJSTEN & AUTOMATISCHE GROEPERING
+              VIEW 3: SLIMME AFSPEELLIJSTEN & AUTOMATISCHE JAAR-LIJSTEN
              =================================================================== */}
           {activeTab === 'playlists' && (
             <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Automatische Afspeellijst-Generator
+                    Automatische Jaar-Afspeellijsten & Slimme Regels
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                    Groepeer je lokale muziekbestanden automatisch in Spotify-afspeellijsten op
-                    basis van mappenstructuur, ID3-genre, BPM-bereik of lossless formaat.
+                    Elk nummer dat op Spotify beschikbaar is, wordt automatisch in een{' '}
+                    <span className="font-mono text-[#FF8F00]">MP3Spot Jaar: YYYY</span> afspeellijst geplaatst,
+                    aangevuld met je eigen map-, genre- en BPM-regels.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={handleGenerateRulesFromFolders}
-                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                    onClick={handleGenerateRulesFromYears}
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-[#FF8F00]/40 text-amber-900 dark:text-[#FF8F00] hover:bg-[#FF8F00]/10 transition-colors whitespace-nowrap"
                   >
-                    Genereer Lijsten uit Mappen ({folderStats.length})
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span>Synchroniseer Jaar-Lijsten ({yearStats.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleGenerateRulesFromFolders}
+                    className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-800 dark:text-[#E6E7E9] hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors whitespace-nowrap"
+                  >
+                    Genereer uit Mappen ({folderStats.length})
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowNewRuleForm((v) => !v)}
-                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>Nieuwe Slimme Regel</span>
@@ -2687,7 +2819,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               {showNewRuleForm && (
                 <form
                   onSubmit={handleCreateCustomRule}
-                  className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 p-5 space-y-4"
+                  className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] p-5 space-y-4"
                 >
                   <div className="flex items-center justify-between">
                     <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
@@ -2714,8 +2846,22 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         onChange={(e) =>
                           setNewRuleDraft((d) => ({ ...d, name: e.target.value }))
                         }
-                        placeholder="bijv. Deep House Warmup (118-124 BPM)"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        placeholder="bijv. MP3Spot Jaar: 2020 of Deep House Warmup"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                        Specifiek Releasejaar (optioneel)
+                      </label>
+                      <input
+                        type="number"
+                        value={newRuleDraft.exactYear}
+                        onChange={(e) =>
+                          setNewRuleDraft((d) => ({ ...d, exactYear: e.target.value }))
+                        }
+                        placeholder="bijv. 2021"
+                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                       />
                     </div>
                     <div>
@@ -2729,7 +2875,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           setNewRuleDraft((d) => ({ ...d, genreContains: e.target.value }))
                         }
                         placeholder="bijv. House, Indie, Nederpop"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                       />
                     </div>
                     <div>
@@ -2743,7 +2889,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           setNewRuleDraft((d) => ({ ...d, folderContains: e.target.value }))
                         }
                         placeholder="bijv. DJ Collectie"
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                       />
                     </div>
                     <div>
@@ -2757,7 +2903,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           setNewRuleDraft((d) => ({ ...d, minBpm: e.target.value }))
                         }
                         placeholder="bijv. 118"
-                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                       />
                     </div>
                     <div>
@@ -2771,47 +2917,29 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           setNewRuleDraft((d) => ({ ...d, maxBpm: e.target.value }))
                         }
                         placeholder="bijv. 128"
-                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                        Minimale Match Zekerheid (%)
-                      </label>
-                      <input
-                        type="number"
-                        min={50}
-                        max={99}
-                        value={newRuleDraft.minConfidence}
-                        onChange={(e) =>
-                          setNewRuleDraft((d) => ({
-                            ...d,
-                            minConfidence: Number(e.target.value) || 80,
-                          }))
-                        }
-                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
                       />
                     </div>
                     <div className="flex flex-col justify-end gap-2">
-                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                      <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
                         <input
                           type="checkbox"
                           checked={newRuleDraft.onlyLossless}
                           onChange={(e) =>
                             setNewRuleDraft((d) => ({ ...d, onlyLossless: e.target.checked }))
                           }
-                          className="rounded border-slate-400"
+                          className="rounded border-[#3A3D40] text-[#D84315] focus:ring-[#FF8F00]"
                         />
                         <span>Alleen Lossless (FLAC / WAV)</span>
                       </label>
-                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                      <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
                         <input
                           type="checkbox"
                           checked={newRuleDraft.isPublic}
                           onChange={(e) =>
                             setNewRuleDraft((d) => ({ ...d, isPublic: e.target.checked }))
                           }
-                          className="rounded border-slate-400"
+                          className="rounded border-[#3A3D40] text-[#D84315] focus:ring-[#FF8F00]"
                         />
                         <span>Openbare Spotify-lijst</span>
                       </label>
@@ -2822,13 +2950,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     <button
                       type="button"
                       onClick={() => setShowNewRuleForm(false)}
-                      className="px-3.5 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700"
+                      className="px-3.5 py-2 text-xs rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#25282C]"
                     >
                       Annuleren
                     </button>
                     <button
                       type="submit"
-                      className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400"
+                      className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 shadow-sm"
                     >
                       Afspeellijst Regel Opslaan
                     </button>
@@ -2837,7 +2965,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               )}
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                <div className="lg:col-span-5 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 divide-y divide-slate-200 dark:divide-slate-800">
+                <div className="lg:col-span-5 border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] divide-y divide-slate-200 dark:divide-[#3A3D40]">
                   {evaluatedPlaylists.map((ep) => {
                     const isSelected = activePlaylistEval?.rule.id === ep.rule.id;
                     return (
@@ -2846,8 +2974,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         onClick={() => setSelectedPlaylistId(ep.rule.id)}
                         className={`p-4 cursor-pointer transition-colors ${
                           isSelected
-                            ? 'bg-emerald-500/10'
-                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                            ? 'bg-[#FF8F00]/10 border-l-4 border-l-[#FF8F00]'
+                            : 'hover:bg-slate-50 dark:hover:bg-[#25282C]'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
@@ -2874,7 +3002,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 mt-2.5 font-mono tabular-nums">
                           <span>{ep.qualifyingTracks.length} lokale tracks</span>
                           <span aria-hidden="true">·</span>
-                          <span className="text-emerald-600 dark:text-emerald-400">
+                          <span className="text-[#00B4D8] font-medium">
                             {ep.newUrisToAdd.length} nieuw te synchroniseren
                           </span>
                           <span aria-hidden="true">·</span>
@@ -2885,16 +3013,19 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   })}
                 </div>
 
-                <div className="lg:col-span-7 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
+                <div className="lg:col-span-7 border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] overflow-hidden">
                   {activePlaylistEval ? (
                     <div>
-                      <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="p-5 border-b border-slate-200 dark:border-[#3A3D40] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div>
                           <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
                             {activePlaylistEval.rule.name}
                           </h2>
                           <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
                             Min. matchzekerheid: {activePlaylistEval.rule.filter.minConfidence}%
+                            {activePlaylistEval.rule.filter.exactYear
+                              ? ` · Jaar: ${activePlaylistEval.rule.filter.exactYear}`
+                              : ''}
                             {activePlaylistEval.rule.filter.genreContains
                               ? ` · Genre: ${activePlaylistEval.rule.filter.genreContains}`
                               : ''}
@@ -2910,13 +3041,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           type="button"
                           onClick={handleRunDifferentialSync}
                           disabled={isSyncing}
-                          className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap shrink-0"
+                          className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-sm cursor-pointer disabled:opacity-50"
                         >
                           Synchroniseer Deze Lijst ({activePlaylistEval.newUrisToAdd.length} nieuw)
                         </button>
                       </div>
 
-                      <div className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
+                      <div className="divide-y divide-slate-200 dark:divide-[#3A3D40] text-xs">
                         {activePlaylistEval.qualifyingTracks.length === 0 ? (
                           <div className="p-8 text-center text-slate-500">
                             Geen lokale muziekbestanden voldoen momenteel aan deze filtercriteria.
@@ -2929,7 +3060,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                             return (
                               <div
                                 key={trk.id}
-                                className="px-4 py-3 flex items-center justify-between gap-4"
+                                className="px-4 py-3 flex items-center justify-between gap-4 hover:bg-slate-50/50 dark:hover:bg-[#25282C] transition-colors"
                               >
                                 <div className="flex items-center gap-3 min-w-0">
                                   <span className="font-mono tabular-nums text-slate-400 w-5">
@@ -2940,8 +3071,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                       {trk.artist} — {trk.title}
                                     </div>
                                     <div className="text-[11px] text-slate-500 font-mono truncate">
-                                      {trk.format} · {trk.bpm || '—'} BPM ·{' '}
-                                      {uri || 'Geen Spotify URI gekoppeld'}
+                                      {trk.format} · Jaar: {trk.selectedMatch?.releaseYear || trk.year}{' '}
+                                      · {uri ? <span className="text-[#00B4D8]">{uri}</span> : 'Geen Spotify URI gekoppeld'}
                                     </div>
                                   </div>
                                 </div>
@@ -2949,7 +3080,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                                   {isAlreadySynced ? (
                                     <span className="text-slate-500">Al in Spotify (=)</span>
                                   ) : uri ? (
-                                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                                    <span className="text-[#FF8F00] font-medium">
                                       + Nieuw in wachtrij
                                     </span>
                                   ) : (
@@ -2975,22 +3106,22 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
              =================================================================== */}
           {activeTab === 'sync' && (
             <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Differentiële Bibliotheek-Synchronisatie & Volume Export
+                    MP3Spot Differentiële Synchronisatie & Volume Export
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                    Synchroniseer nieuwe nummers naar Spotify of schrijf `.m3u8` / `.json` / `.csv`
-                    afspeellijsten rechtstreeks naar het gemounte Docker-volume (
-                    <span className="font-mono">{appAuthStatus.exportsPath || '/exports'}</span>).
+                    Synchroniseer je jaar-afspeellijsten en slimme lijsten naar Spotify of schrijf
+                    `.m3u8` / `.json` / `.csv` rechtstreeks naar het gemounte Docker-volume (
+                    <span className="font-mono text-[#00B4D8]">{appAuthStatus.exportsPath || '/exports'}</span>).
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() => handleWriteExportToVolume('m3u8')}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 transition-colors whitespace-nowrap"
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-[#00B4D8]/40 text-[#00B4D8] hover:bg-[#00B4D8]/10 transition-colors whitespace-nowrap"
                   >
                     <HardDrive className="w-3.5 h-3.5" />
                     <span>Schrijf .M3U8 naar /exports</span>
@@ -2998,7 +3129,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   <button
                     type="button"
                     onClick={() => handleExportSyncReport('json')}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-[#E6E7E9] hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors whitespace-nowrap"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>JSON Mapping</span>
@@ -3006,7 +3137,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   <button
                     type="button"
                     onClick={() => handleExportSyncReport('csv')}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-[#E6E7E9] hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors whitespace-nowrap"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>CSV Rapport</span>
@@ -3015,7 +3146,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     type="button"
                     onClick={handleRunDifferentialSync}
                     disabled={isSyncing}
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
+                    className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer disabled:opacity-50"
                   >
                     {isSyncing
                       ? 'Bezig met synchroniseren...'
@@ -3024,10 +3155,10 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 </div>
               </div>
 
-              <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
-                <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 dark:border-[#3A3D40] flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-slate-900 dark:text-white">
-                    Synchronisatieplan (Diff per Afspeellijst)
+                    Synchronisatieplan (Inclusief Jaar-Afspeellijsten)
                   </h2>
                   <span className="text-xs font-mono tabular-nums text-slate-500">
                     Modus:{' '}
@@ -3039,27 +3170,34 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
-                      <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-500 dark:text-slate-400 bg-slate-50/60 dark:bg-slate-900/80">
+                      <tr className="border-b border-slate-200 dark:border-[#3A3D40] text-[11px] font-semibold text-slate-500 dark:text-slate-400 bg-slate-50/60 dark:bg-[#16181A]">
                         <th className="py-2.5 px-4">Afspeellijst</th>
+                        <th className="py-2.5 px-4">Type</th>
                         <th className="py-2.5 px-4 text-right">Lokale Matches</th>
                         <th className="py-2.5 px-4 text-right">Reeds Gesynchroniseerd (=)</th>
                         <th className="py-2.5 px-4 text-right">Nieuw Toe te Voegen (+)</th>
-                        <th className="py-2.5 px-4 text-right">Onbekend / Lokaal (!)</th>
                         <th className="py-2.5 px-4 text-right">Laatste Sync</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                    <tbody className="divide-y divide-slate-200 dark:divide-[#3A3D40]">
                       {evaluatedPlaylists.map((ep) => (
-                        <tr key={ep.rule.id}>
+                        <tr key={ep.rule.id} className="hover:bg-slate-50/50 dark:hover:bg-[#25282C] transition-colors">
                           <td className="py-3 px-4">
                             <div className="font-semibold text-slate-900 dark:text-white">
                               {ep.rule.name}
                             </div>
                             <div className="text-[11px] text-slate-500 font-mono">
-                              {ep.rule.spotifyPlaylistId
-                                ? `spotify:playlist:${ep.rule.spotifyPlaylistId}`
-                                : 'Nieuwe afspeellijst bij eerstvolgende sync'}
+                              {ep.rule.spotifyPlaylistId ? (
+                                <span className="text-[#00B4D8]">spotify:playlist:{ep.rule.spotifyPlaylistId}</span>
+                              ) : (
+                                'Nieuwe afspeellijst bij eerstvolgende sync'
+                              )}
                             </div>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
+                            {ep.rule.strategy === 'year'
+                              ? `Jaar (${ep.rule.filter.exactYear})`
+                              : ep.rule.strategy}
                           </td>
                           <td className="py-3 px-4 text-right font-mono tabular-nums">
                             {ep.readyMatches.length}
@@ -3067,11 +3205,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-500">
                             {ep.alreadySyncedUris.length}
                           </td>
-                          <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
+                          <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#FF8F00]">
                             +{ep.newUrisToAdd.length}
-                          </td>
-                          <td className="py-3 px-4 text-right font-mono tabular-nums text-amber-600 dark:text-amber-400">
-                            {ep.unmatchedInRule}
                           </td>
                           <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-500">
                             {ep.rule.lastSyncedAt
@@ -3090,17 +3225,17 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 </div>
               </div>
 
-              <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
-                <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800">
+              <div className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 dark:border-[#3A3D40]">
                   <h2 className="text-xs font-semibold text-slate-900 dark:text-white">
                     Synchronisatiegeschiedenis
                   </h2>
                 </div>
-                <div className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
+                <div className="divide-y divide-slate-200 dark:divide-[#3A3D40] text-xs">
                   {syncHistory.map((item) => (
                     <div
                       key={item.id}
-                      className="px-4 py-3 flex items-center justify-between gap-4"
+                      className="px-4 py-3 flex items-center justify-between gap-4 hover:bg-slate-50/50 dark:hover:bg-[#25282C] transition-colors"
                     >
                       <div>
                         <span className="font-medium text-slate-900 dark:text-white">
@@ -3125,7 +3260,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                           href={item.spotifyUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                          className="text-[#00B4D8] hover:underline flex items-center gap-1 font-medium"
                         >
                           <span>Spotify</span>
                           <ExternalLink className="w-3 h-3" />
@@ -3144,11 +3279,11 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
 
       {/* Spotify OAuth Configuration & Redirect URI Modal */}
       {showOAuthModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl max-w-xl w-full p-6 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 backdrop-blur-xs">
+          <div className="bg-white dark:bg-[#1E2124] border border-slate-300 dark:border-[#3A3D40] rounded-xl max-w-xl w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#3A3D40] pb-3">
               <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-emerald-500" />
+                <KeyRound className="w-4 h-4 text-[#FF8F00]" />
                 <h2 className="text-base font-semibold text-slate-900 dark:text-white">
                   Spotify Developer OAuth Configuratie
                 </h2>
@@ -3169,12 +3304,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 href="https://developer.spotify.com/dashboard"
                 target="_blank"
                 rel="noreferrer"
-                className="text-emerald-600 dark:text-emerald-400 underline"
+                className="text-[#00B4D8] underline hover:opacity-80"
               >
                 Spotify Developer Dashboard
               </a>{' '}
-              en stel je <span className="font-mono">SPOTIFY_CLIENT_ID</span> en{' '}
-              <span className="font-mono">SPOTIFY_CLIENT_SECRET</span> in bij de omgevingsvariabelen.
+              en stel je <span className="font-mono text-[#FF8F00]">SPOTIFY_CLIENT_ID</span> en{' '}
+              <span className="font-mono text-[#FF8F00]">SPOTIFY_CLIENT_SECRET</span> in bij de omgevingsvariabelen.
             </p>
 
             <div className="space-y-3 text-xs">
@@ -3183,13 +3318,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   1. Development Redirect URI:
                 </div>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-slate-950 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto">
+                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
                     {devCallbackUrl}
                   </code>
                   <button
                     type="button"
                     onClick={() => copyToClipboard(devCallbackUrl, 'dev')}
-                    className="px-3 py-2 rounded border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                    className="px-3 py-2 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
                   >
                     {copiedUrlKey === 'dev' ? 'Gekopieerd' : 'Kopieer'}
                   </button>
@@ -3201,13 +3336,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   2. Shared / Deployed Redirect URI:
                 </div>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-slate-950 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto">
+                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
                     {sharedCallbackUrl}
                   </code>
                   <button
                     type="button"
                     onClick={() => copyToClipboard(sharedCallbackUrl, 'shared')}
-                    className="px-3 py-2 rounded border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                    className="px-3 py-2 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
                   >
                     {copiedUrlKey === 'shared' ? 'Gekopieerd' : 'Kopieer'}
                   </button>
@@ -3215,18 +3350,18 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-[#3A3D40]">
               <button
                 type="button"
                 onClick={() => setShowOAuthModal(false)}
-                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700"
+                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#25282C]"
               >
                 Sluiten
               </button>
               <button
                 type="button"
                 onClick={handleConnectSpotify}
-                className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400"
+                className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 shadow-sm cursor-pointer"
               >
                 Start Spotify OAuth Popup
               </button>

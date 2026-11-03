@@ -38,16 +38,19 @@ export interface LocalAudioTrack {
   musicalKey?: string;
   isrc?: string;
   durationSec: number;
-  tagSource: 'ID3v2.4' | 'ID3v2.3' | 'FLAC Vorbis' | 'M4A Atom' | 'Bestandsnaam';
-  // Spotify Matching State
+  tagSource: 'ID3v2.4' | 'ID3v2.3' | 'FLAC Vorbis' | 'M4A Atom' | 'Bestandsnaam' | 'Spotify ID3v2.3';
+  // Spotify Matching & ID3 Tagging State
   matchStatus: MatchStatus;
   selectedMatch?: SpotifyCandidate;
   candidates: SpotifyCandidate[];
+  id3TaggedFromSpotify?: boolean;
+  id3TaggedAt?: string;
   lastSyncedAt?: string;
   syncedPlaylistIds: string[];
 }
 
 export type GroupingStrategy =
+  | 'year'
   | 'folder'
   | 'genre'
   | 'decade'
@@ -55,6 +58,7 @@ export type GroupingStrategy =
   | 'custom_rule';
 
 export interface SmartRuleFilter {
+  exactYear?: number;
   genreContains?: string;
   folderContains?: string;
   minBpm?: number;

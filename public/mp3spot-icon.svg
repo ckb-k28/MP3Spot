@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <!-- Background Vinyl Disc Gradient -->
+    <radialGradient id="discGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#242729" />
+      <stop offset="70%" stop-color="#1B1D1F" />
+      <stop offset="100%" stop-color="#121314" />
+    </radialGradient>
+
+    <!-- Kolenkachel Glowing Fire Gradient (D84315 to FF8F00) -->
+    <linearGradient id="fireGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#D84315" />
+      <stop offset="60%" stop-color="#F4511E" />
+      <stop offset="100%" stop-color="#FF8F00" />
+    </linearGradient>
+
+    <!-- Hete Vlamkern Gradient (00B4D8 to Cyan) -->
+    <linearGradient id="coreFlameGrad" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#0077B6" />
+      <stop offset="50%" stop-color="#00B4D8" />
+      <stop offset="100%" stop-color="#90E0EF" />
+    </linearGradient>
+
+    <!-- Glow Filter for Fire & Core -->
+    <filter id="fireGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Outer Vinyl Disc (Nacht / Antraciet #3A3D40) -->
+  <circle cx="64" cy="64" r="60" fill="url(#discGrad)" stroke="#3A3D40" stroke-width="3.5" />
+
+  <!-- Concentric Grooves (Subtle Kolenkachel Ash / Antraciet) -->
+  <circle cx="64" cy="64" r="51" stroke="#3A3D40" stroke-width="1.2" stroke-dasharray="3 2" opacity="0.6" />
+  <circle cx="64" cy="64" r="43" stroke="#3A3D40" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.5" />
+  <circle cx="64" cy="64" r="35" stroke="#3A3D40" stroke-width="1" opacity="0.4" />
+
+  <!-- Radiating Fire Soundwaves (Gloeiende Kolen & Knisperend Vuur #D84315 / #FF8F00) -->
+  <!-- Top Sound Arc -->
+  <path d="M 34 52 A 38 38 0 0 1 94 52" stroke="url(#fireGrad)" stroke-width="4.5" stroke-linecap="round" opacity="0.95" />
+  <!-- Middle Sound Arc -->
+  <path d="M 40 64 A 28 28 0 0 1 88 64" stroke="url(#fireGrad)" stroke-width="4" stroke-linecap="round" />
+  <!-- Bottom Sound Arc -->
+  <path d="M 46 76 A 20 20 0 0 1 82 76" stroke="url(#fireGrad)" stroke-width="3.5" stroke-linecap="round" opacity="0.9" />
+
+  <!-- Center Hub Collar (Warm Coal Flame Rim) -->
+  <circle cx="64" cy="64" r="22" fill="#1C1E20" stroke="url(#fireGrad)" stroke-width="2.5" />
+
+  <!-- Hete Vlamkern (Helder Blauw #00B4D8 Hot Core) -->
+  <!-- Outer Blue Flame Ring -->
+  <circle cx="64" cy="64" r="14" fill="#101C24" stroke="url(#coreFlameGrad)" stroke-width="2.5" filter="url(#fireGlow)" />
+
+  <!-- Stylized Flame Spindle Core -->
+  <path d="M 64 53 C 60 59, 57 63, 57 67 C 57 71, 60 74, 64 74 C 68 74, 71 71, 71 67 C 71 63, 68 59, 64 53 Z" fill="url(#coreFlameGrad)" />
+  
+  <!-- Tiny Hot Center Spindle Dot -->
+  <circle cx="64" cy="67" r="2.5" fill="#FFFFFF" opacity="0.95" />
+</svg>
