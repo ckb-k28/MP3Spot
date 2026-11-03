@@ -49,7 +49,18 @@ interface SpotifyCandidate {
   externalUrl: string;
 }
 
+interface SpotifyOAuthError {
+  code: string;
+  message: string;
+  details?: string;
+  hint?: string;
+  redirectUriUsed?: string;
+  timestamp: string;
+}
+
 const sessions = new Map<string, SpotifySession>();
+let defaultSessionId: string | null = null;
+let lastOAuthError: SpotifyOAuthError | null = null;
 let clientCredentialsToken: { token: string; expiresAt: number } | null = null;
 
 // ============================================================================
@@ -83,20 +94,60 @@ const STATE_FILE_PATH = path.join(DATA_PATH, 'mp3spot-state.json');
 const VERSION_FILE_PATH = path.join(process.cwd(), 'src', 'version.json');
 const SPOTIFY_CONFIG_FILE_PATH = path.join(DATA_PATH, 'mp3spot-spotify.json');
 
-try {
-  if (fs.existsSync(SPOTIFY_CONFIG_FILE_PATH)) {
-    const raw = fs.readFileSync(SPOTIFY_CONFIG_FILE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed.clientId && !process.env.SPOTIFY_CLIENT_ID) {
-      process.env.SPOTIFY_CLIENT_ID = parsed.clientId;
+function loadSpotifyConfigFromDisk(): void {
+  try {
+    if (fs.existsSync(SPOTIFY_CONFIG_FILE_PATH)) {
+      const raw = fs.readFileSync(SPOTIFY_CONFIG_FILE_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed.clientId && !process.env.SPOTIFY_CLIENT_ID) {
+        process.env.SPOTIFY_CLIENT_ID = String(parsed.clientId).trim();
+      }
+      if (parsed.clientSecret && !process.env.SPOTIFY_CLIENT_SECRET) {
+        process.env.SPOTIFY_CLIENT_SECRET = String(parsed.clientSecret).trim();
+      }
+      if (Array.isArray(parsed.sessions)) {
+        for (const item of parsed.sessions) {
+          if (item && item.id && item.accessToken && item.user) {
+            sessions.set(item.id, item as SpotifySession);
+          }
+        }
+      }
+      if (parsed.defaultSessionId && sessions.has(parsed.defaultSessionId)) {
+        defaultSessionId = parsed.defaultSessionId;
+      } else if (sessions.size > 0) {
+        defaultSessionId = Array.from(sessions.keys()).pop() || null;
+      }
+      if (parsed.lastOAuthError) {
+        lastOAuthError = parsed.lastOAuthError;
+      }
     }
-    if (parsed.clientSecret && !process.env.SPOTIFY_CLIENT_SECRET) {
-      process.env.SPOTIFY_CLIENT_SECRET = parsed.clientSecret;
-    }
+  } catch {
+    // Ignore read errors
   }
-} catch {
-  // Ignore
 }
+
+async function saveSpotifyConfigToDisk(): Promise<void> {
+  try {
+    await fs.promises.mkdir(DATA_PATH, { recursive: true });
+    const payload = {
+      clientId: process.env.SPOTIFY_CLIENT_ID || '',
+      clientSecret: process.env.SPOTIFY_CLIENT_SECRET || '',
+      defaultSessionId,
+      sessions: Array.from(sessions.values()),
+      lastOAuthError,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.promises.writeFile(
+      SPOTIFY_CONFIG_FILE_PATH,
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Ignore write errors
+  }
+}
+
+loadSpotifyConfigFromDisk();
 
 // ============================================================================
 // Build Versioning System: year.month.day.build#
@@ -604,12 +655,31 @@ const REFERENCE_CATALOG: Array<{
   },
 ];
 
+function isHttpsRequest(req: Request): boolean {
+  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
+  return proto.toLowerCase().includes('https');
+}
+
 function getSessionFromReq(req: Request): SpotifySession | null {
   const headerSessionId = req.headers['x-spotify-session'] as string | undefined;
   const cookies = parseCookies(req.headers.cookie);
-  const sessionId = headerSessionId || cookies['spotify_session_id'];
-  if (!sessionId) return null;
-  return sessions.get(sessionId) || null;
+  const candidateIds = [
+    headerSessionId,
+    cookies['spotify_session_id'],
+    defaultSessionId || undefined,
+  ].filter(Boolean) as string[];
+
+  for (const sid of candidateIds) {
+    const found = sessions.get(sid);
+    if (found) return found;
+  }
+
+  if (sessions.size > 0) {
+    const latest = Array.from(sessions.values()).pop();
+    if (latest) return latest;
+  }
+
+  return null;
 }
 
 function getRedirectUri(req: Request): string {
@@ -621,8 +691,12 @@ function getRedirectUri(req: Request): string {
   if (appUrl && appUrl !== 'MY_APP_URL' && appUrl.startsWith('http')) {
     return `${appUrl.replace(/\/$/, '')}/auth/callback`;
   }
-  const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
-  const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost:3000';
+  const proto =
+    ((req.headers['x-forwarded-proto'] as string) || req.protocol || 'http').split(',')[0].trim();
+  const host =
+    ((req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost:3000')
+      .split(',')[0]
+      .trim();
   return `${proto}://${host}/auth/callback`;
 }
 
@@ -721,7 +795,19 @@ async function getSpotifyAccessToken(req: Request): Promise<string | null> {
           session.accessToken = data.access_token;
           session.expiresAt = Date.now() + data.expires_in * 1000;
           if (data.refresh_token) session.refreshToken = data.refresh_token;
+          sessions.set(session.id, session);
+          await saveSpotifyConfigToDisk();
           return session.accessToken;
+        } else {
+          const errText = await resp.text();
+          lastOAuthError = {
+            code: 'TOKEN_REFRESH_FAILED',
+            message: 'Spotify sessie kon niet automatisch worden vernieuwd.',
+            details: `HTTP ${resp.status}: ${errText}`,
+            hint: 'Klik op "Verbind Spotify" om je sessie opnieuw te autoriseren.',
+            timestamp: new Date().toISOString(),
+          };
+          await saveSpotifyConfigToDisk();
         }
       } catch (e) {
         console.error('Spotify token refresh error:', e);
@@ -1447,34 +1533,118 @@ async function startServer() {
   app.post('/api/auth/spotify/credentials', async (req: Request, res: Response) => {
     const { clientId, clientSecret } = req.body as { clientId?: string; clientSecret?: string };
     if (clientId !== undefined) {
-      process.env.SPOTIFY_CLIENT_ID = (clientId || '').trim();
+      process.env.SPOTIFY_CLIENT_ID = (clientId || '').trim().replace(/^["']|["']$/g, '');
     }
     if (clientSecret !== undefined && clientSecret.trim().length > 0) {
-      process.env.SPOTIFY_CLIENT_SECRET = (clientSecret || '').trim();
+      process.env.SPOTIFY_CLIENT_SECRET = (clientSecret || '').trim().replace(/^["']|["']$/g, '');
     }
     clientCredentialsToken = null;
-    try {
-      await fs.promises.mkdir(DATA_PATH, { recursive: true });
-      await fs.promises.writeFile(
-        SPOTIFY_CONFIG_FILE_PATH,
-        JSON.stringify(
-          {
-            clientId: process.env.SPOTIFY_CLIENT_ID || '',
-            clientSecret: process.env.SPOTIFY_CLIENT_SECRET || '',
-          },
-          null,
-          2
-        ),
-        'utf8'
-      );
-    } catch {
-      // Ignore
-    }
+    lastOAuthError = null;
+    await saveSpotifyConfigToDisk();
     res.json({
       ok: true,
       clientId: process.env.SPOTIFY_CLIENT_ID || '',
       hasSecret: Boolean(process.env.SPOTIFY_CLIENT_SECRET),
     });
+  });
+
+  // Test Spotify Client ID & Secret directly via Client Credentials flow
+  app.post('/api/auth/spotify/test', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as { clientId?: string; clientSecret?: string };
+    if (body.clientId !== undefined && body.clientId.trim().length > 0) {
+      process.env.SPOTIFY_CLIENT_ID = body.clientId.trim().replace(/^["']|["']$/g, '');
+    }
+    if (body.clientSecret !== undefined && body.clientSecret.trim().length > 0) {
+      process.env.SPOTIFY_CLIENT_SECRET = body.clientSecret.trim().replace(/^["']|["']$/g, '');
+    }
+
+    const clientId = process.env.SPOTIFY_CLIENT_ID || '';
+    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET || '';
+    const redirectUri = getRedirectUri(req);
+
+    if (!clientId || !clientSecret) {
+      lastOAuthError = {
+        code: 'MISSING_CREDENTIALS',
+        message: 'SPOTIFY_CLIENT_ID of SPOTIFY_CLIENT_SECRET ontbreekt.',
+        details: !clientId
+          ? 'Geen SPOTIFY_CLIENT_ID ingevuld.'
+          : 'Geen SPOTIFY_CLIENT_SECRET ingevuld.',
+        hint: 'Vul zowel je Client ID als je Client Secret uit het Spotify Developer Dashboard in en klik op "Sleutels Opslaan".',
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
+      res.status(400).json({ ok: false, error: lastOAuthError });
+      return;
+    }
+
+    try {
+      const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+      const tokenResp = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${basic}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+        }),
+      });
+
+      if (!tokenResp.ok) {
+        const rawErr = await tokenResp.text();
+        let parsedDesc = rawErr;
+        try {
+          const j = JSON.parse(rawErr);
+          parsedDesc = j.error_description || j.error || rawErr;
+        } catch {
+          // keep raw text
+        }
+        lastOAuthError = {
+          code: 'INVALID_CLIENT_CREDENTIALS',
+          message: `Spotify weigerde de API-sleutels (${parsedDesc}).`,
+          details: `HTTP ${tokenResp.status}: ${rawErr}`,
+          hint: 'Controleer of SPOTIFY_CLIENT_ID en SPOTIFY_CLIENT_SECRET exact overeenkomen met je app in het Spotify Developer Dashboard (zonder extra spaties).',
+          redirectUriUsed: redirectUri,
+          timestamp: new Date().toISOString(),
+        };
+        await saveSpotifyConfigToDisk();
+        res.status(400).json({ ok: false, error: lastOAuthError });
+        return;
+      }
+
+      const data = (await tokenResp.json()) as { access_token: string; expires_in: number };
+      clientCredentialsToken = {
+        token: data.access_token,
+        expiresAt: Date.now() + data.expires_in * 1000,
+      };
+      lastOAuthError = null;
+      await saveSpotifyConfigToDisk();
+
+      res.json({
+        ok: true,
+        message:
+          'Spotify API-sleutels (Client ID & Secret) zijn geldig! Zorg dat de Redirect URI in je Spotify Dashboard staat en klik op "Verbind Spotify".',
+        redirectUri,
+      });
+    } catch (err: any) {
+      lastOAuthError = {
+        code: 'NETWORK_ERROR',
+        message: 'Kon geen verbinding maken met accounts.spotify.com.',
+        details: String(err?.message || err),
+        hint: 'Controleer of de server/container uitgaande internetverbinding heeft.',
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
+      res.status(500).json({ ok: false, error: lastOAuthError });
+    }
+  });
+
+  app.post('/api/auth/spotify/clear-error', async (_req: Request, res: Response) => {
+    lastOAuthError = null;
+    await saveSpotifyConfigToDisk();
+    res.json({ ok: true });
   });
 
   // --- 1. Spotify OAuth Configuration & Status ---
@@ -1487,21 +1657,38 @@ async function startServer() {
 
     res.json({
       connected: Boolean(session),
+      sessionId: session ? session.id : undefined,
       hasCredentials,
+      clientId: process.env.SPOTIFY_CLIENT_ID || '',
       redirectUri,
       appUrl: process.env.APP_URL || '',
       user: session ? session.user : null,
+      lastError: lastOAuthError,
     });
   });
 
   // --- 2. Construct Spotify OAuth URL for Popup ---
-  app.get('/api/auth/spotify/url', requireAppAuth, (req: Request, res: Response) => {
-    const clientId = process.env.SPOTIFY_CLIENT_ID;
+  app.get('/api/auth/spotify/url', requireAppAuth, async (req: Request, res: Response) => {
+    const clientId = (process.env.SPOTIFY_CLIENT_ID || '').trim();
+    const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
     const redirectUri = getRedirectUri(req);
 
-    if (!clientId) {
+    if (!clientId || !clientSecret) {
+      lastOAuthError = {
+        code: 'MISSING_CREDENTIALS',
+        message: !clientId
+          ? 'SPOTIFY_CLIENT_ID ontbreekt.'
+          : 'SPOTIFY_CLIENT_SECRET ontbreekt.',
+        details:
+          'Zowel SPOTIFY_CLIENT_ID als SPOTIFY_CLIENT_SECRET zijn vereist om een OAuth-koppeling te starten.',
+        hint: 'Vul je Spotify Client ID en Client Secret in bij de OAuth-instellingen of Inline Config en sla ze op.',
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
       res.status(400).json({
-        error: 'SPOTIFY_CLIENT_ID ontbreekt in de omgevingsvariabelen.',
+        error: lastOAuthError.message,
+        lastError: lastOAuthError,
         redirectUri,
       });
       return;
@@ -1535,28 +1722,140 @@ async function startServer() {
     });
   });
 
-  // --- 3. Spotify OAuth Callback (Popup Handler) ---
-  const callbackHandler = async (req: Request, res: Response) => {
-    const { code, state, error } = req.query;
-
-    if (error) {
+  // Helper to render styled HTML in OAuth popup and notify main window via postMessage + localStorage
+  const sendOAuthPopupResponse = (
+    res: Response,
+    payload:
+      | {
+          ok: true;
+          sessionId: string;
+          displayName: string;
+          warningHint?: string;
+        }
+      | {
+          ok: false;
+          errorObj: SpotifyOAuthError;
+        }
+  ) => {
+    if (payload.ok) {
+      const eventPayload = {
+        type: 'OAUTH_AUTH_SUCCESS',
+        sessionId: payload.sessionId,
+        displayName: payload.displayName,
+        warningHint: payload.warningHint || '',
+        timestamp: new Date().toISOString(),
+      };
       res.send(`
         <!doctype html>
         <html lang="nl">
-          <body style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; text-align: center;">
-            <h3>Spotify authenticatie geannuleerd</h3>
-            <p>${String(error)}</p>
-            <script>
-              if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(String(error))} }, '*');
-                setTimeout(() => window.close(), 1500);
+          <head>
+            <meta charset="utf-8" />
+            <title>MP3Spot — Spotify Verbonden</title>
+          </head>
+          <body style="font-family: system-ui, -apple-system, sans-serif; background: #16181A; color: #E6E7E9; padding: 2rem; text-align: center; display: flex; align-items: center; justify-content: center; min-height: 85vh; margin: 0;">
+            <div style="max-width: 440px; width: 100%; background: #1E2124; border: 1px solid #3A3D40; border-radius: 12px; padding: 24px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);">
+              <div style="width: 44px; height: 44px; border-radius: 50%; background: rgba(16, 185, 129, 0.15); color: #10B981; display: inline-flex; align-items: center; justify-content: center; font-size: 22px; font-weight: bold; margin-bottom: 12px;">✓</div>
+              <h3 style="margin: 0 0 8px 0; color: #FFFFFF; font-size: 18px;">Verbonden met Spotify!</h3>
+              <p style="margin: 0 0 16px 0; font-size: 13px; color: #94A3B8;">
+                Ingelogd als <strong style="color: #FF8F00;">${payload.displayName}</strong>.
+              </p>
+              ${
+                payload.warningHint
+                  ? `<div style="text-align: left; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #FCD34D; margin-bottom: 16px;">${payload.warningHint}</div>`
+                  : ''
               }
+              <p style="margin: 0 0 16px 0; font-size: 12px; color: #64748B;">Dit venster sluit automatisch...</p>
+              <button onclick="window.close()" style="background: linear-gradient(to right, #D84315, #FF8F00); color: #090A0B; border: none; padding: 8px 18px; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer;">
+                Sluit Venster & Ga Terug
+              </button>
+            </div>
+            <script>
+              (function() {
+                var evt = ${JSON.stringify(eventPayload)};
+                try {
+                  localStorage.setItem('mp3spot_session_id', evt.sessionId);
+                  localStorage.setItem('mp3spot_oauth_result', JSON.stringify(evt));
+                } catch (e) {}
+                try {
+                  if (window.opener && !window.opener.closed) {
+                    window.opener.postMessage(evt, '*');
+                  }
+                } catch (e) {}
+                setTimeout(function() {
+                  try { window.close(); } catch (e) {}
+                }, 900);
+              })();
             </script>
           </body>
         </html>
       `);
       return;
     }
+
+    const { errorObj } = payload;
+    const eventPayload = {
+      type: 'OAUTH_AUTH_ERROR',
+      error: errorObj.message,
+      errorObj,
+      timestamp: errorObj.timestamp,
+    };
+
+    res.status(200).send(`
+      <!doctype html>
+      <html lang="nl">
+        <head>
+          <meta charset="utf-8" />
+          <title>MP3Spot — Spotify OAuth Foutmelding</title>
+        </head>
+        <body style="font-family: system-ui, -apple-system, sans-serif; background: #16181A; color: #E6E7E9; padding: 1.5rem; display: flex; align-items: center; justify-content: center; min-height: 90vh; margin: 0;">
+          <div style="max-width: 520px; width: 100%; background: #1E2124; border: 1px solid #D84315; border-radius: 12px; padding: 24px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.6);">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+              <span style="background: rgba(216, 67, 21, 0.2); color: #FF8F00; padding: 6px 10px; border-radius: 8px; font-weight: bold; font-size: 14px;">⚠️ Spotify OAuth Fout</span>
+              <span style="font-family: monospace; font-size: 11px; color: #94A3B8;">${errorObj.code}</span>
+            </div>
+            <h3 style="margin: 0 0 10px 0; color: #FFFFFF; font-size: 16px;">${errorObj.message}</h3>
+            ${
+              errorObj.details
+                ? `<div style="background: #121416; border: 1px solid #3A3D40; border-radius: 8px; padding: 10px 12px; font-family: monospace; font-size: 11px; color: #F87171; margin-bottom: 12px; word-break: break-word;">${errorObj.details}</div>`
+                : ''
+            }
+            ${
+              errorObj.hint
+                ? `<div style="background: rgba(0, 180, 216, 0.1); border: 1px solid rgba(0, 180, 216, 0.35); border-radius: 8px; padding: 12px; font-size: 12px; color: #E6E7E9; line-height: 1.5; margin-bottom: 12px;"><strong style="color: #00B4D8; display: block; margin-bottom: 4px;">Hoe los je dit op:</strong>${errorObj.hint}</div>`
+                : ''
+            }
+            ${
+              errorObj.redirectUriUsed
+                ? `<div style="font-size: 11px; color: #94A3B8; margin-bottom: 16px;">Gebruikte Redirect URI:<br/><code style="display: block; background: #121416; padding: 6px 8px; border-radius: 6px; margin-top: 4px; color: #FF8F00; word-break: break-all;">${errorObj.redirectUriUsed}</code></div>`
+                : ''
+            }
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+              <button onclick="window.close()" style="background: linear-gradient(to right, #D84315, #FF8F00); color: #090A0B; border: none; padding: 9px 18px; border-radius: 8px; font-weight: 700; font-size: 12px; cursor: pointer;">
+                Venster Sluiten
+              </button>
+            </div>
+          </div>
+          <script>
+            (function() {
+              var evt = ${JSON.stringify(eventPayload)};
+              try {
+                localStorage.setItem('mp3spot_oauth_result', JSON.stringify(evt));
+              } catch (e) {}
+              try {
+                if (window.opener && !window.opener.closed) {
+                  window.opener.postMessage(evt, '*');
+                }
+              } catch (e) {}
+            })();
+          </script>
+        </body>
+      </html>
+    `);
+  };
+
+  // --- 3. Spotify OAuth Callback (Popup Handler) ---
+  const callbackHandler = async (req: Request, res: Response) => {
+    const { code, state, error } = req.query;
 
     let redirectUri = getRedirectUri(req);
     if (typeof state === 'string') {
@@ -1568,11 +1867,45 @@ async function startServer() {
       }
     }
 
-    const clientId = process.env.SPOTIFY_CLIENT_ID;
-    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+    if (error) {
+      const errStr = String(error);
+      lastOAuthError = {
+        code: `SPOTIFY_${errStr.toUpperCase()}`,
+        message:
+          errStr === 'access_denied'
+            ? 'Spotify autorisatie is geannuleerd of geweigerd.'
+            : `Spotify gaf een OAuth-fout terug: ${errStr}`,
+        details: `Callback query error=${errStr}`,
+        hint:
+          errStr === 'access_denied'
+            ? 'Klik in het Spotify-inlogscherm op "Akkoord" (Agree) en controleer of je Spotify-account e-mailadres is toegevoegd onder "Users and Access" in het Spotify Developer Dashboard.'
+            : `Controleer of de Redirect URI (${redirectUri}) exact is toegevoegd in je Spotify Developer Dashboard.`,
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
+      sendOAuthPopupResponse(res, { ok: false, errorObj: lastOAuthError });
+      return;
+    }
+
+    const clientId = (process.env.SPOTIFY_CLIENT_ID || '').trim();
+    const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
 
     if (!code || !clientId || !clientSecret) {
-      res.status(400).send('Ongeldige OAuth callback of ontbrekende Spotify API-sleutels.');
+      lastOAuthError = {
+        code: 'MISSING_CALLBACK_PARAMS',
+        message: 'Ongeldige OAuth callback of ontbrekende Spotify API-sleutels op de server.',
+        details: !code
+          ? 'Geen authorization code ontvangen van Spotify.'
+          : !clientId
+          ? 'SPOTIFY_CLIENT_ID is leeg op de server.'
+          : 'SPOTIFY_CLIENT_SECRET is leeg op de server.',
+        hint: 'Sla eerst je SPOTIFY_CLIENT_ID en SPOTIFY_CLIENT_SECRET op in het configuratiepaneel voordat je de OAuth-popup start.',
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
+      sendOAuthPopupResponse(res, { ok: false, errorObj: lastOAuthError });
       return;
     }
 
@@ -1593,7 +1926,35 @@ async function startServer() {
 
       if (!tokenResp.ok) {
         const errText = await tokenResp.text();
-        res.status(400).send(`Kon Spotify token niet ophalen: ${errText}`);
+        let errDesc = errText;
+        let errCode = 'TOKEN_EXCHANGE_FAILED';
+        try {
+          const parsed = JSON.parse(errText);
+          errDesc = parsed.error_description || parsed.error || errText;
+          if (parsed.error) errCode = String(parsed.error).toUpperCase();
+        } catch {
+          // keep raw text
+        }
+
+        let hint =
+          'Controleer of je SPOTIFY_CLIENT_ID en SPOTIFY_CLIENT_SECRET juist zijn en of de Redirect URI exact overeenkomt in het Spotify Developer Dashboard.';
+        if (errDesc.toLowerCase().includes('redirect_uri') || errDesc.toLowerCase().includes('redirect uri')) {
+          hint = `De Redirect URI komt niet overeen. Voeg exact deze URL toe in het Spotify Developer Dashboard onder Redirect URIs: ${redirectUri}`;
+        } else if (errCode === 'INVALID_CLIENT') {
+          hint =
+            'Ongeldige Client ID of Client Secret. Kopieer je Client ID en Client Secret opnieuw uit het Spotify Developer Dashboard en klik op "Sleutels Opslaan".';
+        }
+
+        lastOAuthError = {
+          code: errCode,
+          message: `Kon Spotify toegangstoken niet ophalen: ${errDesc}`,
+          details: `HTTP ${tokenResp.status}: ${errText}`,
+          hint,
+          redirectUriUsed: redirectUri,
+          timestamp: new Date().toISOString(),
+        };
+        await saveSpotifyConfigToDisk();
+        sendOAuthPopupResponse(res, { ok: false, errorObj: lastOAuthError });
         return;
       }
 
@@ -1607,9 +1968,27 @@ async function startServer() {
         headers: { Authorization: `Bearer ${tokenData.access_token}` },
       });
 
+      if (!profileResp.ok) {
+        const profileErrText = await profileResp.text();
+        if (profileResp.status === 403) {
+          lastOAuthError = {
+            code: 'SPOTIFY_DEV_MODE_USER_NOT_REGISTERED',
+            message:
+              'Spotify weigert toegang tot je profiel (HTTP 403 Forbidden: Gebruiker niet geregistreerd in Developer Dashboard).',
+            details: `HTTP 403 bij GET https://api.spotify.com/v1/me — ${profileErrText || 'User not registered in the Developer Dashboard'}`,
+            hint: 'Je Spotify Developer app staat in "Development Mode". Ga naar https://developer.spotify.com/dashboard -> open jouw app -> klik op "Users and Access" en voeg daar je naam en het e-mailadres van je Spotify-account toe!',
+            redirectUriUsed: redirectUri,
+            timestamp: new Date().toISOString(),
+          };
+          await saveSpotifyConfigToDisk();
+          sendOAuthPopupResponse(res, { ok: false, errorObj: lastOAuthError });
+          return;
+        }
+      }
+
       const profileData = profileResp.ok
         ? ((await profileResp.json()) as any)
-        : { id: 'spotify_user', display_name: 'Spotify Gebruiker' };
+        : { id: 'me', display_name: 'Spotify Gebruiker' };
 
       const sessionId = crypto.randomBytes(24).toString('hex');
       const session: SpotifySession = {
@@ -1618,8 +1997,8 @@ async function startServer() {
         refreshToken: tokenData.refresh_token,
         expiresAt: Date.now() + tokenData.expires_in * 1000,
         user: {
-          id: profileData.id,
-          display_name: profileData.display_name || profileData.id,
+          id: profileData.id || 'me',
+          display_name: profileData.display_name || profileData.email || profileData.id || 'Spotify Gebruiker',
           email: profileData.email,
           product: profileData.product,
           country: profileData.country,
@@ -1627,50 +2006,53 @@ async function startServer() {
       };
 
       sessions.set(sessionId, session);
+      defaultSessionId = sessionId;
+      lastOAuthError = null;
+      await saveSpotifyConfigToDisk();
 
+      const isHttps = isHttpsRequest(req);
       res.cookie('spotify_session_id', sessionId, {
-        secure: true,
-        sameSite: 'none',
+        secure: isHttps,
+        sameSite: isHttps ? 'none' : 'lax',
         httpOnly: true,
-        maxAge: 7 * 24 * 60 * 60 * 1000,
+        maxAge: 30 * 24 * 60 * 60 * 1000,
       });
 
-      res.send(`
-        <!doctype html>
-        <html lang="nl">
-          <body style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; text-align: center;">
-            <h3>Verbonden met Spotify als ${session.user.display_name}</h3>
-            <p>Dit venster sluit automatisch...</p>
-            <script>
-              if (window.opener) {
-                window.opener.postMessage({
-                  type: 'OAUTH_AUTH_SUCCESS',
-                  sessionId: ${JSON.stringify(sessionId)}
-                }, '*');
-                window.close();
-              } else {
-                window.location.href = '/';
-              }
-            </script>
-          </body>
-        </html>
-      `);
-    } catch (err) {
+      sendOAuthPopupResponse(res, {
+        ok: true,
+        sessionId,
+        displayName: session.user.display_name,
+      });
+    } catch (err: any) {
       console.error('OAuth callback exception:', err);
-      res.status(500).send('Interne fout bij het verwerken van Spotify OAuth.');
+      lastOAuthError = {
+        code: 'CALLBACK_EXCEPTION',
+        message: 'Interne fout bij het verwerken van de Spotify OAuth callback.',
+        details: String(err?.message || err),
+        hint: 'Controleer de netwerkverbinding van de container en probeer het opnieuw.',
+        redirectUriUsed: redirectUri,
+        timestamp: new Date().toISOString(),
+      };
+      await saveSpotifyConfigToDisk();
+      sendOAuthPopupResponse(res, { ok: false, errorObj: lastOAuthError });
     }
   };
 
   app.get(['/auth/callback', '/auth/callback/'], callbackHandler);
 
-  app.post('/api/auth/spotify/logout', requireAppAuth, (req: Request, res: Response) => {
+  app.post('/api/auth/spotify/logout', requireAppAuth, async (req: Request, res: Response) => {
     const session = getSessionFromReq(req);
     if (session) {
       sessions.delete(session.id);
     }
+    sessions.clear();
+    defaultSessionId = null;
+    await saveSpotifyConfigToDisk();
+
+    const isHttps = isHttpsRequest(req);
     res.clearCookie('spotify_session_id', {
-      secure: true,
-      sameSite: 'none',
+      secure: isHttps,
+      sameSite: isHttps ? 'none' : 'lax',
       httpOnly: true,
     });
     res.json({ ok: true });
@@ -1788,23 +2170,35 @@ async function startServer() {
             }
             externalUrl = `https://open.spotify.com/playlist/${targetPlaylistId}`;
           } else {
-            const createResp = await fetch(
-              `https://api.spotify.com/v1/users/${encodeURIComponent(session.user.id)}/playlists`,
-              {
-                method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  name: pl.name,
-                  description:
-                    pl.description ||
-                    'Automatisch gesynchroniseerd vanuit lokale muziekbibliotheek via MP3Spot.',
-                  public: pl.isPublic,
-                }),
-              }
-            );
+            const createBody = JSON.stringify({
+              name: pl.name,
+              description:
+                pl.description ||
+                'Automatisch gesynchroniseerd vanuit lokale muziekbibliotheek via MP3Spot.',
+              public: pl.isPublic,
+            });
+            let createResp = await fetch('https://api.spotify.com/v1/me/playlists', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: createBody,
+            });
+
+            if (!createResp.ok && session.user.id && session.user.id !== 'me') {
+              createResp = await fetch(
+                `https://api.spotify.com/v1/users/${encodeURIComponent(session.user.id)}/playlists`,
+                {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: createBody,
+                }
+              );
+            }
 
             if (createResp.ok) {
               const created = (await createResp.json()) as any;

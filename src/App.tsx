@@ -25,6 +25,8 @@ import {
   Sparkles,
   ListMusic,
   Layers,
+  PanelLeft,
+  PanelLeftClose,
 } from 'lucide-react';
 import {
   AutoPlaylistRule,
@@ -45,7 +47,7 @@ import {
 } from './utils/audioMetadataParser';
 import initialVersionData from './version.json';
 import { MP3SpotLogo, MP3SpotIcon } from './components/MP3SpotLogo';
-import { InlineConfigPanel } from './components/InlineConfigPanel';
+import { InlineConfigPanel, SpotifyOAuthError } from './components/InlineConfigPanel';
 
 type ActiveTab = 'library' | 'matcher' | 'playlists' | 'sync' | 'config';
 
@@ -58,7 +60,9 @@ interface BuildVersionInfo {
 
 interface SpotifyAuthStatus {
   connected: boolean;
+  sessionId?: string;
   hasCredentials: boolean;
+  clientId?: string;
   redirectUri: string;
   appUrl: string;
   user: {
@@ -68,6 +72,7 @@ interface SpotifyAuthStatus {
     product?: string;
     country?: string;
   } | null;
+  lastError?: SpotifyOAuthError | null;
 }
 
 interface AppAuthStatus {
@@ -134,9 +139,31 @@ function doesTrackMatchRule(track: LocalAudioTrack, rule: AutoPlaylistRule): boo
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<ActiveTab>('library');
+  // Optional sidebar on smaller screens (< lg hidden by default, toggleable drawer) + collapsible on desktop
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+  const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('mp3spot_desktop_sidebar') !== 'closed';
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleDesktopSidebar = () => {
+    setIsDesktopSidebarOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('mp3spot_desktop_sidebar', next ? 'open' : 'closed');
+      } catch {
+        // Ignore
+      }
+      return next;
+    });
+  };
 
   const handleSwitchTab = (tab: ActiveTab) => {
     setActiveTab(tab);
+    setIsMobileSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -266,12 +293,20 @@ export default function App() {
     redirectUri: `${window.location.origin}/auth/callback`,
     appUrl: window.location.origin,
     user: null,
+    lastError: null,
   });
   const [sessionIdToken, setSessionIdToken] = useState<string>(() => {
     return localStorage.getItem('mp3spot_session_id') || '';
   });
   const [showOAuthModal, setShowOAuthModal] = useState<boolean>(false);
   const [copiedUrlKey, setCopiedUrlKey] = useState<string | null>(null);
+  const [modalClientId, setModalClientId] = useState<string>('');
+  const [modalClientSecret, setModalClientSecret] = useState<string>('');
+  const [isSavingModalCreds, setIsSavingModalCreds] = useState<boolean>(false);
+  const [isTestingModalCreds, setIsTestingModalCreds] = useState<boolean>(false);
+  const [modalTestMessage, setModalTestMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [isWaitingForOAuthPopup, setIsWaitingForOAuthPopup] = useState<boolean>(false);
+  const oauthPopupRef = useRef<Window | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -620,45 +655,247 @@ export default function App() {
       if (resp.ok) {
         const data = (await resp.json()) as SpotifyAuthStatus;
         setSpotifyAuth(data);
+        if (data.clientId && !modalClientId) {
+          setModalClientId(data.clientId);
+        }
+        if (data.connected && data.sessionId) {
+          setSessionIdToken(data.sessionId);
+          try {
+            localStorage.setItem('mp3spot_session_id', data.sessionId);
+          } catch {
+            // Ignore
+          }
+        }
+        return data;
       }
     } catch {
       // Keep local fallback
     }
+    return null;
   };
 
-  // Listen for OAuth Popup postMessage callback
+  // Process OAuth callback event from either postMessage or localStorage
+  const processOAuthResultPayload = (payload: any) => {
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.type === 'OAUTH_AUTH_SUCCESS') {
+      const newSessionId = payload.sessionId || '';
+      if (newSessionId) {
+        setSessionIdToken(newSessionId);
+        try {
+          localStorage.setItem('mp3spot_session_id', newSessionId);
+        } catch {
+          // Ignore
+        }
+      }
+      setIsWaitingForOAuthPopup(false);
+      fetchSpotifyStatus(newSessionId);
+      setShowOAuthModal(false);
+      setNoticeBanner({
+        type: 'success',
+        message: `Succesvol verbonden met Spotify${
+          payload.displayName ? ` als ${payload.displayName}` : ''
+        }. Live synchronisatie is nu actief!`,
+      });
+    } else if (payload.type === 'OAUTH_AUTH_ERROR') {
+      setIsWaitingForOAuthPopup(false);
+      fetchSpotifyStatus();
+      const errMsg =
+        payload.errorObj?.message ||
+        payload.error ||
+        'Er is een fout opgetreden bij het verbinden met Spotify.';
+      const errHint = payload.errorObj?.hint ? ` — ${payload.errorObj.hint}` : '';
+      setNoticeBanner({
+        type: 'warning',
+        message: `Spotify OAuth fout: ${errMsg}${errHint}`,
+      });
+      setShowOAuthModal(true);
+    }
+  };
+
+  // Listen for OAuth Popup postMessage callback, localStorage fallback & window focus
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
+      if (
+        event.data?.type !== 'OAUTH_AUTH_SUCCESS' &&
+        event.data?.type !== 'OAUTH_AUTH_ERROR'
+      ) {
         return;
       }
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        const newSessionId = event.data.sessionId || '';
-        if (newSessionId) {
-          setSessionIdToken(newSessionId);
-          localStorage.setItem('mp3spot_session_id', newSessionId);
+      const origin = event.origin || '';
+      const isTrustedOrigin =
+        origin === window.location.origin ||
+        origin.endsWith('.run.app') ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1');
+      // Accept if origin matches current host/run.app/localhost or has valid MP3Spot OAuth payload
+      if (!isTrustedOrigin && !event.data?.type?.startsWith('OAUTH_AUTH_')) {
+        return;
+      }
+      processOAuthResultPayload(event.data);
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === 'mp3spot_oauth_result' && event.newValue) {
+        try {
+          const parsed = JSON.parse(event.newValue);
+          processOAuthResultPayload(parsed);
+        } catch {
+          // Ignore parse error
         }
-        fetchSpotifyStatus(newSessionId);
-        setShowOAuthModal(false);
-        setNoticeBanner({
-          type: 'success',
-          message: 'Succesvol verbonden met je Spotify-account. Live synchronisatie is nu actief.',
-        });
-      } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
-        setNoticeBanner({
-          type: 'warning',
-          message: `Spotify koppeling onderbroken: ${event.data.error || 'Geannuleerd'}`,
-        });
+      } else if (event.key === 'mp3spot_session_id' && event.newValue) {
+        setSessionIdToken(event.newValue);
+        fetchSpotifyStatus(event.newValue);
       }
     };
 
+    const handleWindowFocus = () => {
+      fetchSpotifyStatus();
+    };
+
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
   }, [sessionIdToken]);
+
+  // Poll backend status while OAuth popup is open so connection/errors are detected even if window.opener is severed
+  useEffect(() => {
+    if (!isWaitingForOAuthPopup) return;
+    let attempts = 0;
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const rawStored = localStorage.getItem('mp3spot_oauth_result');
+        if (rawStored) {
+          localStorage.removeItem('mp3spot_oauth_result');
+          const parsed = JSON.parse(rawStored);
+          processOAuthResultPayload(parsed);
+          return;
+        }
+      } catch {
+        // Ignore
+      }
+
+      const status = await fetchSpotifyStatus();
+      if (status?.connected) {
+        setIsWaitingForOAuthPopup(false);
+        setShowOAuthModal(false);
+        try {
+          if (oauthPopupRef.current && !oauthPopupRef.current.closed) {
+            oauthPopupRef.current.close();
+          }
+        } catch {
+          // Ignore
+        }
+        setNoticeBanner({
+          type: 'success',
+          message: `Verbonden met Spotify als ${status.user?.display_name || 'Spotify Gebruiker'}. Live synchronisatie is nu actief!`,
+        });
+      } else if (status?.lastError) {
+        setIsWaitingForOAuthPopup(false);
+        setNoticeBanner({
+          type: 'warning',
+          message: `Spotify OAuth fout (${status.lastError.code}): ${status.lastError.message}${
+            status.lastError.hint ? ` — ${status.lastError.hint}` : ''
+          }`,
+        });
+        setShowOAuthModal(true);
+      } else if (
+        (oauthPopupRef.current && oauthPopupRef.current.closed) ||
+        attempts > 90
+      ) {
+        setIsWaitingForOAuthPopup(false);
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, [isWaitingForOAuthPopup]);
+
+  const handleSaveModalCredentials = async () => {
+    if (!modalClientId.trim() && !modalClientSecret.trim()) return true;
+    setIsSavingModalCreds(true);
+    try {
+      const resp = await fetch('/api/auth/spotify/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: modalClientId.trim() || undefined,
+          clientSecret: modalClientSecret.trim() || undefined,
+        }),
+      });
+      if (resp.ok) {
+        setModalClientSecret('');
+        await fetchSpotifyStatus();
+        return true;
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setIsSavingModalCreds(false);
+    }
+    return false;
+  };
+
+  const handleTestModalCredentials = async () => {
+    setIsTestingModalCreds(true);
+    setModalTestMessage(null);
+    try {
+      const resp = await fetch(
+        `/api/auth/spotify/test?origin=${encodeURIComponent(window.location.origin)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId: modalClientId.trim() || undefined,
+            clientSecret: modalClientSecret.trim() || undefined,
+          }),
+        }
+      );
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        setModalClientSecret('');
+        setModalTestMessage({ ok: true, text: data.message });
+      } else {
+        setModalTestMessage({
+          ok: false,
+          text: data.error?.message || 'API-sleutels konden niet worden geverifieerd.',
+        });
+      }
+      await fetchSpotifyStatus();
+    } catch {
+      setModalTestMessage({
+        ok: false,
+        text: 'Netwerkfout bij het testen van de Spotify API-sleutels.',
+      });
+    } finally {
+      setIsTestingModalCreds(false);
+    }
+  };
+
+  const handleClearSpotifyError = async () => {
+    setModalTestMessage(null);
+    await fetch('/api/auth/spotify/clear-error', { method: 'POST' }).catch(() => {});
+    await fetchSpotifyStatus();
+  };
 
   const handleConnectSpotify = async () => {
     try {
+      // Clear any stale localStorage oauth event
+      try {
+        localStorage.removeItem('mp3spot_oauth_result');
+      } catch {
+        // Ignore
+      }
+      await fetch('/api/auth/spotify/clear-error', { method: 'POST' }).catch(() => {});
+
+      if (modalClientId.trim() || modalClientSecret.trim()) {
+        await handleSaveModalCredentials();
+      }
+
       const resp = await fetch(
         `/api/auth/spotify/url?origin=${encodeURIComponent(window.location.origin)}`,
         {
@@ -666,17 +903,28 @@ export default function App() {
         }
       );
       if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        await fetchSpotifyStatus();
         setShowOAuthModal(true);
+        if (errData.error) {
+          setNoticeBanner({
+            type: 'warning',
+            message: `Spotify configuratie vereist: ${errData.error}`,
+          });
+        }
         return;
       }
       const { url } = await resp.json();
       const popup = window.open(url, 'spotify_oauth_popup', 'width=560,height=720');
+      oauthPopupRef.current = popup;
       if (!popup) {
         setShowOAuthModal(true);
         setNoticeBanner({
           type: 'warning',
           message: 'Pop-up werd geblokkeerd door de browser. Sta pop-ups toe voor deze pagina.',
         });
+      } else {
+        setIsWaitingForOAuthPopup(true);
       }
     } catch {
       setShowOAuthModal(true);
@@ -690,7 +938,12 @@ export default function App() {
         headers: getAuthHeaders(),
       });
       setSessionIdToken('');
-      localStorage.removeItem('mp3spot_session_id');
+      try {
+        localStorage.removeItem('mp3spot_session_id');
+        localStorage.removeItem('mp3spot_oauth_result');
+      } catch {
+        // Ignore
+      }
       fetchSpotifyStatus('');
       setNoticeBanner({
         type: 'info',
@@ -1465,7 +1718,7 @@ services:
         cd /app && git pull;
       fi &&
       cd /app &&
-      npm install &&
+      npm install --include=dev --legacy-peer-deps &&
       npm run build &&
       npm run start"
 
@@ -1719,27 +1972,67 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
         className="hidden"
       />
 
-      {/* Top Bar Navigation: Brand + Polished Responsive Segmented Tabs + Quick Actions */}
-      <header className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3 border-b border-slate-200 dark:border-[#3A3D40] bg-white/95 dark:bg-[#1E2124]/95 backdrop-blur-md sticky top-0 z-30 shadow-xs">
-        {/* Zone 1: Brand anchor with icon, wordmark & version tag */}
-        <a
-          href="#bibliotheek"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveTab('library');
-          }}
-          className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 font-display hover:opacity-90 transition-opacity"
-        >
-          <MP3SpotIcon size={30} />
-          <div className="flex flex-col">
-            <span className="leading-tight">
-              MP3<span className="text-[#FF8F00]">Spot</span>
-            </span>
-            <span className="text-[10px] font-mono text-slate-400 font-normal leading-none">
-              v{buildInfo.version}
-            </span>
-          </div>
-        </a>
+      {/* Top Bar Navigation: Sidebar Toggle + Brand + Polished Responsive Segmented Tabs + Quick Actions */}
+      <header className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-b border-slate-200 dark:border-[#3A3D40] bg-white/95 dark:bg-[#1E2124]/95 backdrop-blur-md sticky top-0 z-30 shadow-xs">
+        {/* Zone 1: Optional Sidebar Toggle + Brand anchor */}
+        <div className="flex items-center gap-2.5 shrink-0">
+          {/* Mobile / Tablet (< lg) Optional Sidebar Drawer Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsMobileSidebarOpen((v) => !v)}
+            className={`lg:hidden flex items-center gap-1.5 px-2.5 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
+              isMobileSidebarOpen || selectedFolder !== 'ALL'
+                ? 'border-[#FF8F00] bg-[#FF8F00]/15 text-[#FF8F00]'
+                : 'border-slate-200 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#2A2D30]'
+            }`}
+            title="Zijbalk met mappen & lijsten openen/sluiten"
+            aria-label="Zijbalk wisselen"
+          >
+            {isMobileSidebarOpen ? (
+              <PanelLeftClose className="w-4 h-4 text-[#FF8F00]" />
+            ) : (
+              <PanelLeft className="w-4 h-4 text-[#FF8F00]" />
+            )}
+            <span className="hidden sm:inline">Zijbalk</span>
+            {selectedFolder !== 'ALL' && (
+              <span className="w-2 h-2 rounded-full bg-[#FF8F00]" />
+            )}
+          </button>
+
+          {/* Desktop (lg+) Collapsible Sidebar Toggle */}
+          <button
+            type="button"
+            onClick={toggleDesktopSidebar}
+            className="hidden lg:flex items-center justify-center p-2 rounded-lg border border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2A2D30] transition-colors cursor-pointer"
+            title={isDesktopSidebarOpen ? 'Zijbalk inklappen' : 'Zijbalk uitklappen'}
+            aria-label="Zijbalk inklappen of uitklappen"
+          >
+            {isDesktopSidebarOpen ? (
+              <PanelLeftClose className="w-4 h-4 text-[#FF8F00]" />
+            ) : (
+              <PanelLeft className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+            )}
+          </button>
+
+          <a
+            href="#bibliotheek"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('library');
+            }}
+            className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 font-display hover:opacity-90 transition-opacity"
+          >
+            <MP3SpotIcon size={30} />
+            <div className="flex flex-col">
+              <span className="leading-tight">
+                MP3<span className="text-[#FF8F00]">Spot</span>
+              </span>
+              <span className="text-[10px] font-mono text-slate-400 font-normal leading-none">
+                v{buildInfo.version}
+              </span>
+            </div>
+          </a>
+        </div>
 
         {/* Zone 2: Polished 5-Tab Segmented Control (Always visible & responsive) */}
         <nav
@@ -1923,11 +2216,46 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
         </div>
       </header>
 
-      {/* Main Workspace Canvas: Sidebar + Content Viewport */}
-      <div className="flex-1 flex flex-col lg:flex-row max-w-[1600px] w-full mx-auto">
-        {/* Left Navigation & Folder Tree Sidebar */}
-        <aside className="w-full lg:w-64 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-5 flex flex-col justify-between gap-6">
+      {/* Main Workspace Canvas: Optional/Responsive Sidebar + Content Viewport */}
+      <div className="flex-1 flex flex-col lg:flex-row max-w-[1600px] w-full mx-auto relative">
+        {/* Backdrop overlay when optional sidebar drawer is open on smaller screens (< lg) */}
+        {isMobileSidebarOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs lg:hidden"
+            onClick={() => setIsMobileSidebarOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Left Navigation & Folder Tree Sidebar — Optional slide-over drawer on < lg, collapsible panel on lg+ */}
+        <aside
+          className={`${
+            isMobileSidebarOpen
+              ? 'fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] overflow-y-auto shadow-2xl flex'
+              : 'hidden'
+          } ${
+            isDesktopSidebarOpen
+              ? 'lg:static lg:z-auto lg:w-64 lg:shadow-none lg:flex'
+              : 'lg:hidden'
+          } shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-[#181B1E] lg:dark:bg-slate-900/60 p-5 flex-col justify-between gap-6`}
+        >
           <div className="space-y-6">
+            {/* Mobile Drawer Header with Close Button (< lg only) */}
+            <div className="flex lg:hidden items-center justify-between pb-3 border-b border-slate-200 dark:border-[#3A3D40]">
+              <div className="flex items-center gap-2 font-bold text-sm text-slate-900 dark:text-white">
+                <MP3SpotIcon size={22} />
+                <span>Zijbalk & Mappen</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMobileSidebarOpen(false)}
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-[#3A3D40] text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                aria-label="Sluit zijbalk"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
             {/* Hoofdnavigatie Menu (All screen sizes: Desktop & Mobile) */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -2082,6 +2410,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 type="button"
                 onClick={() => {
                   setSelectedFolder('ALL');
+                  setIsMobileSidebarOpen(false);
                   if (activeTab === 'playlists' || activeTab === 'sync' || activeTab === 'config') {
                     handleSwitchTab('library');
                   }
@@ -2107,6 +2436,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     title={folderPath}
                     onClick={() => {
                       setSelectedFolder(folderPath);
+                      setIsMobileSidebarOpen(false);
                       if (activeTab === 'playlists' || activeTab === 'sync' || activeTab === 'config') {
                         handleSwitchTab('library');
                       }
@@ -2141,6 +2471,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     type="button"
                     onClick={() => {
                       setSelectedPlaylistId(ep.rule.id);
+                      setIsMobileSidebarOpen(false);
                       handleSwitchTab('playlists');
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
@@ -2457,30 +2788,46 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
             </div>
 
-            {/* Quick direct jumper tabs */}
-            <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-[#121416] p-1 rounded-lg text-[11px]">
-              {(
-                [
-                  ['library', 'Bibliotheek'],
-                  ['matcher', 'Matcher'],
-                  ['playlists', 'Lijsten'],
-                  ['sync', 'Sync'],
-                  ['config', 'Config'],
-                ] as const
-              ).map(([tabId, tabName]) => (
-                <button
-                  key={tabId}
-                  type="button"
-                  onClick={() => handleSwitchTab(tabId)}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-all cursor-pointer ${
-                    activeTab === tabId
-                      ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  {tabName}
-                </button>
-              ))}
+            {/* Quick direct jumper tabs + Optional Sidebar Button for Smaller Screens */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setIsMobileSidebarOpen(true)}
+                className="lg:hidden flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#121416] text-[11px] font-medium text-slate-700 dark:text-slate-300 hover:border-[#FF8F00] transition-colors cursor-pointer"
+              >
+                <PanelLeft className="w-3.5 h-3.5 text-[#FF8F00]" />
+                <span>
+                  Mappen & Lijsten
+                  {selectedFolder !== 'ALL'
+                    ? ` (${selectedFolder.split('/').filter(Boolean).pop()})`
+                    : ''}
+                </span>
+              </button>
+
+              <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-[#121416] p-1 rounded-lg text-[11px]">
+                {(
+                  [
+                    ['library', 'Bibliotheek'],
+                    ['matcher', 'Matcher'],
+                    ['playlists', 'Lijsten'],
+                    ['sync', 'Sync'],
+                    ['config', 'Config'],
+                  ] as const
+                ).map(([tabId, tabName]) => (
+                  <button
+                    key={tabId}
+                    type="button"
+                    onClick={() => handleSwitchTab(tabId)}
+                    className={`px-2.5 py-1 rounded-md font-medium transition-all cursor-pointer ${
+                      activeTab === tabId
+                        ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {tabName}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -3773,15 +4120,15 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
 
       {renderDockhandModal()}
 
-      {/* Spotify OAuth Configuration & Redirect URI Modal */}
+      {/* Spotify OAuth Configuration, Credentials & Diagnostics Modal */}
       {showOAuthModal && (
-        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 backdrop-blur-xs">
-          <div className="bg-white dark:bg-[#1E2124] border border-slate-300 dark:border-[#3A3D40] rounded-xl max-w-xl w-full p-6 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 overflow-y-auto backdrop-blur-xs">
+          <div className="bg-white dark:bg-[#1E2124] border border-slate-300 dark:border-[#3A3D40] rounded-xl max-w-2xl w-full p-6 space-y-4 shadow-2xl my-8">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-[#3A3D40] pb-3">
               <div className="flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-[#FF8F00]" />
                 <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                  Spotify Developer OAuth Configuratie
+                  Spotify Developer OAuth Configuratie & Diagnose
                 </h2>
               </div>
               <button
@@ -3793,34 +4140,181 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </button>
             </div>
 
+            {/* Detailed Error Banner inside OAuth Modal when a connection attempt failed */}
+            {spotifyAuth.lastError && (
+              <div className="p-4 rounded-xl border border-[#D84315] bg-[#D84315]/10 text-xs space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 font-bold text-[#D84315] dark:text-[#FF8F00]">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>Laatste Spotify OAuth Fout ({spotifyAuth.lastError.code})</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearSpotifyError}
+                    className="text-slate-400 hover:text-slate-700 dark:hover:text-white p-0.5"
+                    title="Foutmelding wissen"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <p className="font-semibold text-slate-900 dark:text-white">
+                  {spotifyAuth.lastError.message}
+                </p>
+                {spotifyAuth.lastError.details && (
+                  <div className="p-2 rounded bg-slate-900 text-rose-300 font-mono text-[11px] break-all border border-slate-700">
+                    {spotifyAuth.lastError.details}
+                  </div>
+                )}
+                {spotifyAuth.lastError.hint && (
+                  <div className="p-2.5 rounded bg-[#00B4D8]/10 border border-[#00B4D8]/30 text-slate-800 dark:text-slate-200 leading-relaxed">
+                    <strong className="text-[#00B4D8] block mb-0.5">Hoe los je dit op:</strong>
+                    {spotifyAuth.lastError.hint}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {modalTestMessage && (
+              <div
+                className={`p-3 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+                  modalTestMessage.ok
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                    : 'border-[#D84315]/50 bg-[#D84315]/10 text-[#D84315] dark:text-[#FF8F00]'
+                }`}
+              >
+                <span>{modalTestMessage.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setModalTestMessage(null)}
+                  className="opacity-70 hover:opacity-100"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-              Om afspeellijsten rechtstreeks in je persoonlijke Spotify-account aan te maken,
-              voeg je onderstaande Redirect URI&apos;s toe in het{' '}
+              Om afspeellijsten rechtstreeks in je persoonlijke Spotify-account aan te maken:
+              <br />
+              1. Open het{' '}
               <a
                 href="https://developer.spotify.com/dashboard"
                 target="_blank"
                 rel="noreferrer"
-                className="text-[#00B4D8] underline hover:opacity-80"
+                className="text-[#00B4D8] underline hover:opacity-80 font-medium"
               >
                 Spotify Developer Dashboard
               </a>{' '}
-              en stel je <span className="font-mono text-[#FF8F00]">SPOTIFY_CLIENT_ID</span> en{' '}
-              <span className="font-mono text-[#FF8F00]">SPOTIFY_CLIENT_SECRET</span> in bij de omgevingsvariabelen.
+              en voeg bij <strong>Settings &rarr; Redirect URIs</strong> onderstaande Redirect URI toe.
+              <br />
+              2. Voeg bij <strong>Users and Access</strong> in het Spotify Dashboard je eigen naam en Spotify e-mailadres toe (verplicht zolang je Spotify-app in <em>Development Mode</em> staat, anders weigert Spotify de verbinding met HTTP 403).
             </p>
 
-            <div className="space-y-3 text-xs">
+            {/* Step 1: API Credentials right inside the modal */}
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-[#3A3D40] bg-slate-50/70 dark:bg-[#16181A] space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-900 dark:text-white">
+                  Spotify API-sleutels (worden persistent opgeslagen in /data)
+                </span>
+                <span
+                  className={`font-mono text-[10px] px-2 py-0.5 rounded ${
+                    spotifyAuth.hasCredentials
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold'
+                      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400 font-semibold'
+                  }`}
+                >
+                  {spotifyAuth.hasCredentials ? 'Sleutels Geconfigureerd ✓' : 'Sleutels Vereist'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    SPOTIFY_CLIENT_ID
+                  </label>
+                  <input
+                    type="text"
+                    value={modalClientId}
+                    onChange={(e) => setModalClientId(e.target.value)}
+                    placeholder="Plak je Spotify Client ID..."
+                    className="w-full font-mono text-xs px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124] text-slate-900 dark:text-white focus:outline-none focus:border-[#FF8F00]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    SPOTIFY_CLIENT_SECRET
+                  </label>
+                  <input
+                    type="password"
+                    value={modalClientSecret}
+                    onChange={(e) => setModalClientSecret(e.target.value)}
+                    placeholder={
+                      spotifyAuth.hasCredentials
+                        ? '•••••••••••••••• (reeds opgeslagen)'
+                        : 'Plak je Spotify Client Secret...'
+                    }
+                    className="w-full font-mono text-xs px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124] text-slate-900 dark:text-white focus:outline-none focus:border-[#FF8F00]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleSaveModalCredentials}
+                  disabled={isSavingModalCreds}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-[#FF8F00]/50 bg-[#FF8F00]/15 text-amber-900 dark:text-[#FF8F00] hover:bg-[#FF8F00]/25 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingModalCreds ? 'Opslaan...' : 'Sleutels Opslaan'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTestModalCredentials}
+                  disabled={isTestingModalCreds}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-[#00B4D8]/40 bg-[#00B4D8]/10 text-[#00B4D8] hover:bg-[#00B4D8]/20 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {isTestingModalCreds ? 'Controleren...' : 'Test API Sleutels'}
+                </button>
+              </div>
+            </div>
+
+            {/* Step 2: Redirect URIs */}
+            <div className="space-y-2.5 text-xs">
               <div>
-                <div className="text-slate-500 dark:text-slate-400 mb-1 font-medium">
-                  1. Development Redirect URI:
+                <div className="text-slate-700 dark:text-slate-300 mb-1 font-semibold">
+                  Huidige Actieve Redirect URI (voeg deze exact toe in je Spotify Dashboard):
                 </div>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
+                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-[#FF8F00] overflow-x-auto border border-[#FF8F00]/40">
+                    {spotifyAuth.redirectUri || `${window.location.origin}/auth/callback`}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      copyToClipboard(
+                        spotifyAuth.redirectUri || `${window.location.origin}/auth/callback`,
+                        'active_redirect'
+                      )
+                    }
+                    className="px-3 py-2 rounded border border-[#FF8F00]/40 bg-[#FF8F00]/10 text-amber-900 dark:text-[#FF8F00] text-xs font-semibold hover:bg-[#FF8F00]/20 shrink-0"
+                  >
+                    {copiedUrlKey === 'active_redirect' ? 'Gekopieerd ✓' : 'Kopieer'}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-slate-500 dark:text-slate-400 mb-1 font-medium">
+                  Development Redirect URI:
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 px-3 py-1.5 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
                     {devCallbackUrl}
                   </code>
                   <button
                     type="button"
                     onClick={() => copyToClipboard(devCallbackUrl, 'dev')}
-                    className="px-3 py-2 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
+                    className="px-3 py-1.5 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
                   >
                     {copiedUrlKey === 'dev' ? 'Gekopieerd' : 'Kopieer'}
                   </button>
@@ -3829,16 +4323,16 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
 
               <div>
                 <div className="text-slate-500 dark:text-slate-400 mb-1 font-medium">
-                  2. Shared / Deployed Redirect URI:
+                  Shared / Deployed Redirect URI:
                 </div>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 px-3 py-2 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
+                  <code className="flex-1 px-3 py-1.5 rounded bg-slate-100 dark:bg-[#121416] font-mono text-[11px] text-slate-800 dark:text-[#E6E7E9] overflow-x-auto border border-slate-200 dark:border-[#3A3D40]">
                     {sharedCallbackUrl}
                   </code>
                   <button
                     type="button"
                     onClick={() => copyToClipboard(sharedCallbackUrl, 'shared')}
-                    className="px-3 py-2 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
+                    className="px-3 py-1.5 rounded border border-slate-200 dark:border-[#3A3D40] text-xs font-medium hover:bg-slate-100 dark:hover:bg-[#25282C] shrink-0"
                   >
                     {copiedUrlKey === 'shared' ? 'Gekopieerd' : 'Kopieer'}
                   </button>
@@ -3846,21 +4340,32 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-[#3A3D40]">
-              <button
-                type="button"
-                onClick={() => setShowOAuthModal(false)}
-                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#25282C]"
-              >
-                Sluiten
-              </button>
-              <button
-                type="button"
-                onClick={handleConnectSpotify}
-                className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 shadow-sm cursor-pointer"
-              >
-                Start Spotify OAuth Popup
-              </button>
+            <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-200 dark:border-[#3A3D40]">
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                {spotifyAuth.connected
+                  ? `Verbonden als ${spotifyAuth.user?.display_name}`
+                  : isWaitingForOAuthPopup
+                  ? 'Wachten op Spotify autorisatie in pop-up...'
+                  : 'Niet verbonden'}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowOAuthModal(false)}
+                  className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#25282C]"
+                >
+                  Sluiten
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConnectSpotify}
+                  className="px-4 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 shadow-sm cursor-pointer"
+                >
+                  {modalClientId.trim() || modalClientSecret.trim()
+                    ? 'Opslaan & Start Spotify OAuth Popup'
+                    : 'Start Spotify OAuth Popup'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

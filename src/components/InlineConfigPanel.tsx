@@ -16,6 +16,8 @@ import {
   Layers,
   Sparkles,
   Info,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 
 export interface BuildVersionInfo {
@@ -37,9 +39,20 @@ export interface AppAuthStatus {
   buildInfo?: BuildVersionInfo;
 }
 
+export interface SpotifyOAuthError {
+  code: string;
+  message: string;
+  details?: string;
+  hint?: string;
+  redirectUriUsed?: string;
+  timestamp: string;
+}
+
 export interface SpotifyAuthStatus {
   connected: boolean;
+  sessionId?: string;
   hasCredentials: boolean;
+  clientId?: string;
   redirectUri: string;
   appUrl: string;
   user: {
@@ -49,6 +62,7 @@ export interface SpotifyAuthStatus {
     product?: string;
     country?: string;
   } | null;
+  lastError?: SpotifyOAuthError | null;
 }
 
 interface InlineConfigPanelProps {
@@ -108,10 +122,12 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
   isExpanded = true,
   onToggleExpand,
 }) => {
-  const [clientIdInput, setClientIdInput] = useState<string>('');
+  const [clientIdInput, setClientIdInput] = useState<string>(spotifyAuth.clientId || '');
   const [clientSecretInput, setClientSecretInput] = useState<string>('');
   const [isSavingCreds, setIsSavingCreds] = useState<boolean>(false);
+  const [isTestingCreds, setIsTestingCreds] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [testResultMsg, setTestResultMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [activeConfigSection, setActiveConfigSection] = useState<'all' | 'spotify' | 'volumes' | 'dockhand' | 'version'>('all');
 
   // Load existing credentials on mount
@@ -126,21 +142,28 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
       .catch(() => {});
   }, []);
 
+  const saveCredentialsRequest = async () => {
+    const resp = await fetch('/api/auth/spotify/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: clientIdInput.trim(),
+        clientSecret: clientSecretInput.trim(),
+      }),
+    });
+    return resp.ok;
+  };
+
   const handleSaveSpotifyCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSavingCreds(true);
     setSaveSuccess(false);
+    setTestResultMsg(null);
     try {
-      const resp = await fetch('/api/auth/spotify/credentials', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId: clientIdInput.trim(),
-          clientSecret: clientSecretInput.trim(),
-        }),
-      });
-      if (resp.ok) {
+      const ok = await saveCredentialsRequest();
+      if (ok) {
         setSaveSuccess(true);
+        setClientSecretInput('');
         setTimeout(() => setSaveSuccess(false), 3000);
         onRefreshSpotifyStatus();
       }
@@ -149,10 +172,67 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
     }
   };
 
+  const handleTestSpotifyCredentials = async () => {
+    setIsTestingCreds(true);
+    setTestResultMsg(null);
+    try {
+      const resp = await fetch(
+        `/api/auth/spotify/test?origin=${encodeURIComponent(window.location.origin)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId: clientIdInput.trim() || undefined,
+            clientSecret: clientSecretInput.trim() || undefined,
+          }),
+        }
+      );
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        setClientSecretInput('');
+        setTestResultMsg({ ok: true, text: data.message });
+      } else {
+        setTestResultMsg({
+          ok: false,
+          text: data.error?.message || 'API-sleutels konden niet worden geverifieerd.',
+        });
+      }
+      onRefreshSpotifyStatus();
+    } catch {
+      setTestResultMsg({
+        ok: false,
+        text: 'Netwerkfout bij het testen van de Spotify API-sleutels.',
+      });
+    } finally {
+      setIsTestingCreds(false);
+    }
+  };
+
+  const handleSaveAndConnectSpotify = async () => {
+    if (clientIdInput.trim() || clientSecretInput.trim()) {
+      setIsSavingCreds(true);
+      try {
+        await saveCredentialsRequest();
+        setClientSecretInput('');
+        onRefreshSpotifyStatus();
+      } finally {
+        setIsSavingCreds(false);
+      }
+    }
+    onConnectSpotify();
+  };
+
+  const handleClearOAuthError = async () => {
+    setTestResultMsg(null);
+    await fetch('/api/auth/spotify/clear-error', { method: 'POST' }).catch(() => {});
+    onRefreshSpotifyStatus();
+  };
+
   const devCallbackUrl =
     'https://ais-dev-tzqpzkh4ocjalcl3kqjfzz-636815722959.europe-west3.run.app/auth/callback';
   const sharedCallbackUrl =
     'https://ais-pre-tzqpzkh4ocjalcl3kqjfzz-636815722959.europe-west3.run.app/auth/callback';
+  const activeRedirectUri = spotifyAuth.redirectUri || `${window.location.origin}/auth/callback`;
 
   return (
     <div className="border border-slate-200 dark:border-[#3A3D40] rounded-xl bg-white dark:bg-[#1E2124] overflow-hidden shadow-lg transition-all">
@@ -263,34 +343,87 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                   )}
                 </div>
 
-                <p className="text-xs text-slate-600 dark:text-slate-400">
-                  Maak een gratis app aan in het{' '}
+                {/* Detailed OAuth Error Diagnostic Card */}
+                {spotifyAuth.lastError && (
+                  <div className="p-3.5 rounded-lg border border-[#D84315] bg-[#D84315]/10 text-xs space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 font-bold text-[#D84315] dark:text-[#FF8F00]">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>Spotify OAuth Foutmelding ({spotifyAuth.lastError.code})</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleClearOAuthError}
+                        className="text-slate-400 hover:text-slate-700 dark:hover:text-white p-0.5"
+                        title="Foutmelding wissen"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <p className="font-medium text-slate-900 dark:text-white">
+                      {spotifyAuth.lastError.message}
+                    </p>
+                    {spotifyAuth.lastError.details && (
+                      <div className="p-2 rounded bg-slate-900/90 text-rose-300 font-mono text-[11px] break-all border border-slate-700">
+                        {spotifyAuth.lastError.details}
+                      </div>
+                    )}
+                    {spotifyAuth.lastError.hint && (
+                      <div className="p-2.5 rounded bg-[#00B4D8]/10 border border-[#00B4D8]/30 text-slate-800 dark:text-slate-200 leading-relaxed">
+                        <strong className="text-[#00B4D8] block mb-0.5">Oplossing:</strong>
+                        {spotifyAuth.lastError.hint}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {testResultMsg && (
+                  <div
+                    className={`p-3 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+                      testResultMsg.ok
+                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : 'border-[#D84315]/50 bg-[#D84315]/10 text-[#D84315] dark:text-[#FF8F00]'
+                    }`}
+                  >
+                    <span>{testResultMsg.text}</span>
+                    <button
+                      type="button"
+                      onClick={() => setTestResultMsg(null)}
+                      className="opacity-70 hover:opacity-100"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Maak een app aan in het{' '}
                   <a
                     href="https://developer.spotify.com/dashboard"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[#00B4D8] hover:underline inline-flex items-center gap-0.5"
+                    className="text-[#00B4D8] hover:underline inline-flex items-center gap-0.5 font-medium"
                   >
                     Spotify Developer Dashboard <ExternalLink className="w-3 h-3" />
-                  </a>{' '}
-                  en voeg de onderstaande Redirect URI toe.
+                  </a>
+                  , voeg onderstaande Redirect URI toe én voeg bij <strong>Users and Access</strong> je eigen Spotify e-mailadres toe (verplicht in Spotify Development Mode).
                 </p>
 
                 {/* Redirect URI with copy */}
-                <div className="p-3 rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#141618] space-y-1.5 text-xs">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">
-                    Geldige Redirect URI voor Spotify Developer Dashboard:
+                <div className="p-3 rounded-lg border border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#141618] space-y-2 text-xs">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300 block">
+                    Actieve Redirect URI voor jouw huidige omgeving (voeg toe in Spotify Dashboard):
                   </span>
                   <div className="flex items-center gap-2">
                     <input
                       type="text"
                       readOnly
-                      value={spotifyAuth.redirectUri || devCallbackUrl}
+                      value={activeRedirectUri}
                       className="flex-1 font-mono text-[11px] px-2.5 py-1.5 rounded border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#1E2124] text-slate-800 dark:text-slate-200 select-all"
                     />
                     <button
                       type="button"
-                      onClick={() => copyToClipboard(spotifyAuth.redirectUri || devCallbackUrl, 'inline_uri')}
+                      onClick={() => copyToClipboard(activeRedirectUri, 'inline_uri')}
                       className="px-3 py-1.5 text-xs font-semibold rounded border border-[#00B4D8]/40 bg-[#00B4D8]/10 text-[#00B4D8] hover:bg-[#00B4D8]/20 transition-colors flex items-center gap-1 shrink-0"
                     >
                       {copiedUrlKey === 'inline_uri' ? (
@@ -329,19 +462,32 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                       type="password"
                       value={clientSecretInput}
                       onChange={(e) => setClientSecretInput(e.target.value)}
-                      placeholder={spotifyAuth.hasCredentials ? '•••••••••••••••• (reeds geconfigureerd)' : 'Geheime sleutel van Spotify...'}
+                      placeholder={
+                        spotifyAuth.hasCredentials
+                          ? '•••••••••••••••• (reeds opgeslagen — laat leeg of vul nieuw in)'
+                          : 'Plak hier je Client Secret van Spotify...'
+                      }
                       className="w-full font-mono text-xs px-3 py-2 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#141618] text-slate-900 dark:text-white focus:outline-none focus:border-[#FF8F00]"
                     />
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                    <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="submit"
                         disabled={isSavingCreds}
                         className="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all shadow-xs cursor-pointer disabled:opacity-50"
                       >
                         {isSavingCreds ? 'Opslaan...' : saveSuccess ? 'Opgeslagen! ✓' : 'Sleutels Opslaan'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleTestSpotifyCredentials}
+                        disabled={isTestingCreds}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#00B4D8]/40 bg-[#00B4D8]/10 text-[#00B4D8] hover:bg-[#00B4D8]/20 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isTestingCreds ? 'Testen...' : 'Test API Sleutels'}
                       </button>
 
                       <button
@@ -365,8 +511,8 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                     ) : (
                       <button
                         type="button"
-                        onClick={onConnectSpotify}
-                        className="px-3.5 py-1.5 text-xs font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors"
+                        onClick={handleSaveAndConnectSpotify}
+                        className="px-3.5 py-1.5 text-xs font-bold rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors cursor-pointer"
                       >
                         Verbind Spotify Account
                       </button>

@@ -10,8 +10,8 @@ RUN apk add --no-cache git tzdata
 WORKDIR /app
 
 # Kopieer package.json en installeer dependencies
-COPY package*.json ./
-RUN npm install
+COPY package*.json .npmrc* ./
+RUN npm install --include=dev --legacy-peer-deps
 
 # Kopieer de volledige applicatiebroncode
 COPY . .

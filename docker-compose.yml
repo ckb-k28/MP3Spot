@@ -56,7 +56,7 @@ services:
         cd /app && git pull;
       fi &&
       cd /app &&
-      npm install &&
+      npm install --include=dev --legacy-peer-deps &&
       npm run build &&
       npm run start"
 
