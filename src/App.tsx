@@ -9,21 +9,17 @@ import {
   ExternalLink,
   Plus,
   Trash2,
-  Sliders,
   Download,
-  Music,
-  Disc,
-  ArrowRight,
   ChevronRight,
   Sun,
   Moon,
-  Copy,
   KeyRound,
-  Edit3,
   X,
-  ListMusic,
-  Sparkles,
   CheckCircle2,
+  Lock,
+  LogOut,
+  Server,
+  HardDrive,
 } from 'lucide-react';
 import {
   AutoPlaylistRule,
@@ -56,6 +52,20 @@ interface SpotifyAuthStatus {
     product?: string;
     country?: string;
   } | null;
+}
+
+interface AppAuthStatus {
+  authenticated: boolean;
+  username: string;
+  configuredUsername: string;
+  authMode: 'password_hash' | 'docker_secret_file' | 'env_password' | 'default_fallback';
+  usingDefaultCredentials: boolean;
+  musicLibraryPath: string;
+  musicMountAvailable: boolean;
+  dataPath?: string;
+  dataMountAvailable?: boolean;
+  exportsPath?: string;
+  exportsMountAvailable?: boolean;
 }
 
 function formatDuration(seconds: number): string {
@@ -91,15 +101,66 @@ function doesTrackMatchRule(track: LocalAudioTrack, rule: AutoPlaylistRule): boo
   if (filter.maxYear !== undefined && track.year > filter.maxYear) {
     return false;
   }
-  if (filter.onlyLossless && track.format !== 'FLAC' && track.format !== 'WAV' && track.format !== 'AIFF') {
+  if (
+    filter.onlyLossless &&
+    track.format !== 'FLAC' &&
+    track.format !== 'WAV' &&
+    track.format !== 'AIFF'
+  ) {
     return false;
   }
   return true;
 }
 
+async function computeBrowserSha256(input: string): Promise<string> {
+  if (!input) return '';
+  const encoded = new TextEncoder().encode(input);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<ActiveTab>('library');
+
+  // --- App Login / Docker Compose Auth State ---
+  const [appAuthToken, setAppAuthToken] = useState<string>(() => {
+    return localStorage.getItem('spotisync_app_token') || '';
+  });
+  const [appAuthStatus, setAppAuthStatus] = useState<AppAuthStatus>({
+    authenticated: false,
+    username: 'admin',
+    configuredUsername: 'admin',
+    authMode: 'default_fallback',
+    usingDefaultCredentials: true,
+    musicLibraryPath: '/music',
+    musicMountAvailable: false,
+    dataPath: '/app/data',
+    dataMountAvailable: true,
+    exportsPath: '/exports',
+    exportsMountAvailable: true,
+  });
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
+  const [loginUsername, setLoginUsername] = useState<string>('admin');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
+
+  // --- Dockhand / GitHub Stack Generator Modal State ---
+  const [showDockhandModal, setShowDockhandModal] = useState<boolean>(false);
+  const [dockhandMode, setDockhandMode] = useState<'git_clone' | 'git_build'>('git_clone');
+  const [stackGitRepoUrl, setStackGitRepoUrl] = useState<string>(
+    'https://github.com/jouw-gebruikersnaam/spotisync-studio.git'
+  );
+  const [stackUsername, setStackUsername] = useState<string>('admin');
+  const [stackPasswordInput, setStackPasswordInput] = useState<string>('');
+  const [stackPasswordHash, setStackPasswordHash] = useState<string>('');
+  const [useHashedPasswordInYaml, setUseHashedPasswordInYaml] = useState<boolean>(true);
+  const [stackMusicPath, setStackMusicPath] = useState<string>('/mnt/nas/muziek');
+  const [stackDataPath, setStackDataPath] = useState<string>('spotisync_data');
+  const [stackExportsPath, setStackExportsPath] = useState<string>('./exports');
+  const [stackPort, setStackPort] = useState<string>('3000');
 
   // Core Library, Playlist Rules & Sync History State
   const [tracks, setTracks] = useState<LocalAudioTrack[]>(() => {
@@ -211,38 +272,206 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Persist library & rules to localStorage
+  // Compute SHA-256 hash when user types password in Dockhand generator
+  useEffect(() => {
+    let active = true;
+    computeBrowserSha256(stackPasswordInput || 'mijn_veilig_wachtwoord').then((h) => {
+      if (active) setStackPasswordHash(h);
+    });
+    return () => {
+      active = false;
+    };
+  }, [stackPasswordInput]);
+
+  // Build auth headers for API calls
+  const getAuthHeaders = (overrideAppToken?: string, overrideSpotifySession?: string) => {
+    const headers: Record<string, string> = {};
+    const tok = overrideAppToken ?? appAuthToken;
+    const spSid = overrideSpotifySession ?? sessionIdToken;
+    if (tok) headers['x-app-auth-token'] = tok;
+    if (spSid) headers['x-spotify-session'] = spSid;
+    return headers;
+  };
+
+  // Load persisted state from /app/data volume when authenticated
+  const loadServerVolumeState = async (overrideToken?: string) => {
+    try {
+      const resp = await fetch('/api/server-state', {
+        headers: getAuthHeaders(overrideToken),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.exists && data.state) {
+          if (Array.isArray(data.state.tracks) && data.state.tracks.length > 0) {
+            setTracks(data.state.tracks);
+          }
+          if (Array.isArray(data.state.playlistRules) && data.state.playlistRules.length > 0) {
+            setPlaylistRules(data.state.playlistRules);
+          }
+          if (Array.isArray(data.state.syncHistory) && data.state.syncHistory.length > 0) {
+            setSyncHistory(data.state.syncHistory);
+          }
+        }
+      }
+    } catch {
+      // Ignore fallback to localStorage
+    }
+  };
+
+  // Check App Login status on mount
+  const fetchAppAuthStatus = async (overrideToken?: string) => {
+    try {
+      const resp = await fetch('/api/app-auth/status', {
+        headers: getAuthHeaders(overrideToken),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as AppAuthStatus;
+        setAppAuthStatus(data);
+        setLoginUsername(data.configuredUsername || 'admin');
+        if (data.authenticated) {
+          fetchSpotifyStatus(overrideToken);
+          loadServerVolumeState(overrideToken);
+        }
+      }
+    } catch {
+      // Ignore network error on boot
+    } finally {
+      setIsCheckingAuth(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAppAuthStatus();
+  }, []);
+
+  const handleAppLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setIsLoggingIn(true);
+    try {
+      const resp = await fetch('/api/app-auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setLoginError(data.error || 'Inloggen mislukt.');
+        return;
+      }
+      if (data.token) {
+        setAppAuthToken(data.token);
+        localStorage.setItem('spotisync_app_token', data.token);
+      }
+      setLoginPassword('');
+      await fetchAppAuthStatus(data.token);
+    } catch {
+      setLoginError('Kan geen verbinding maken met de server.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleAppLogout = async () => {
+    try {
+      await fetch('/api/app-auth/logout', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+    } catch {
+      // Ignore
+    }
+    setAppAuthToken('');
+    localStorage.removeItem('spotisync_app_token');
+    setAppAuthStatus((prev) => ({ ...prev, authenticated: false }));
+  };
+
+  // Scan Server Mounted Docker Directory (/music)
+  const handleScanServerVolume = async () => {
+    setIsScanningFiles(true);
+    setScanProgressText(
+      `Scannen van gemounte Docker-map (${appAuthStatus.musicLibraryPath || '/music'})...`
+    );
+    try {
+      const resp = await fetch('/api/server-library/scan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ path: appAuthStatus.musicLibraryPath || '/music' }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setNoticeBanner({
+          type: 'warning',
+          message: data.error || 'Kon servermap niet scannen.',
+        });
+        return;
+      }
+      if (!data.tracks || data.tracks.length === 0) {
+        setNoticeBanner({
+          type: 'info',
+          message: `De gemounte map "${data.path}" is bereikbaar, maar bevat nog geen audiobestanden. Koppel je muziekmap via volumes in je Dockhand stack.`,
+        });
+        return;
+      }
+      setTracks((prev) => {
+        const existingIds = new Set(prev.map((t) => t.id));
+        const fresh = (data.tracks as LocalAudioTrack[]).filter((t) => !existingIds.has(t.id));
+        return [...fresh, ...prev];
+      });
+      await runBatchMatcher(data.tracks);
+    } catch {
+      setNoticeBanner({
+        type: 'warning',
+        message: 'Kon de servermap niet uitlezen.',
+      });
+    } finally {
+      setIsScanningFiles(false);
+      setScanProgressText('');
+    }
+  };
+
+  // Persist library & rules to localStorage AND to /app/data volume when authenticated
   useEffect(() => {
     try {
       localStorage.setItem('spotisync_tracks_v1', JSON.stringify(tracks));
-    } catch {
-      // Ignore quota errors
-    }
-  }, [tracks]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem('spotisync_rules_v1', JSON.stringify(playlistRules));
-    } catch {
-      // Ignore quota errors
-    }
-  }, [playlistRules]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem('spotisync_history_v1', JSON.stringify(syncHistory));
     } catch {
       // Ignore quota errors
     }
-  }, [syncHistory]);
 
-  const fetchSpotifyStatus = async (overrideSessionId?: string) => {
+    if (appAuthStatus.authenticated) {
+      const timer = setTimeout(() => {
+        fetch('/api/server-state', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({
+            updatedAt: new Date().toISOString(),
+            tracks,
+            playlistRules,
+            syncHistory,
+          }),
+        }).catch(() => {});
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [tracks, playlistRules, syncHistory, appAuthStatus.authenticated]);
+
+  const fetchSpotifyStatus = async (overrideAppToken?: string, overrideSpotifySid?: string) => {
     try {
-      const sid = overrideSessionId ?? sessionIdToken;
       const resp = await fetch(
         `/api/auth/spotify/status?origin=${encodeURIComponent(window.location.origin)}`,
         {
-          headers: sid ? { 'x-spotify-session': sid } : {},
+          headers: getAuthHeaders(overrideAppToken, overrideSpotifySid),
         }
       );
       if (resp.ok) {
@@ -253,10 +482,6 @@ export default function App() {
       // Keep local fallback
     }
   };
-
-  useEffect(() => {
-    fetchSpotifyStatus();
-  }, []);
 
   // Listen for OAuth Popup postMessage callback
   useEffect(() => {
@@ -271,7 +496,7 @@ export default function App() {
           setSessionIdToken(newSessionId);
           localStorage.setItem('spotisync_session_id', newSessionId);
         }
-        fetchSpotifyStatus(newSessionId);
+        fetchSpotifyStatus(appAuthToken, newSessionId);
         setShowOAuthModal(false);
         setNoticeBanner({
           type: 'success',
@@ -287,12 +512,15 @@ export default function App() {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [sessionIdToken]);
+  }, [appAuthToken, sessionIdToken]);
 
   const handleConnectSpotify = async () => {
     try {
       const resp = await fetch(
-        `/api/auth/spotify/url?origin=${encodeURIComponent(window.location.origin)}`
+        `/api/auth/spotify/url?origin=${encodeURIComponent(window.location.origin)}`,
+        {
+          headers: getAuthHeaders(),
+        }
       );
       if (!resp.ok) {
         setShowOAuthModal(true);
@@ -316,11 +544,11 @@ export default function App() {
     try {
       await fetch('/api/auth/spotify/logout', {
         method: 'POST',
-        headers: sessionIdToken ? { 'x-spotify-session': sessionIdToken } : {},
+        headers: getAuthHeaders(),
       });
       setSessionIdToken('');
       localStorage.removeItem('spotisync_session_id');
-      fetchSpotifyStatus('');
+      fetchSpotifyStatus(appAuthToken, '');
       setNoticeBanner({
         type: 'info',
         message: 'Spotify-sessie ontkoppeld.',
@@ -351,7 +579,7 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(sessionIdToken ? { 'x-spotify-session': sessionIdToken } : {}),
+          ...getAuthHeaders(),
         },
         body: JSON.stringify({ tracks: payload }),
       });
@@ -424,9 +652,7 @@ export default function App() {
 
     for (let i = 0; i < validFiles.length; i++) {
       const f = validFiles[i];
-      setScanProgressText(
-        `Analyseren (${i + 1}/${validFiles.length}): ${f.name}`
-      );
+      setScanProgressText(`Analyseren (${i + 1}/${validFiles.length}): ${f.name}`);
       const lowerName = f.name.toLowerCase();
       if (lowerName.endsWith('.m3u') || lowerName.endsWith('.m3u8')) {
         const text = await f.text();
@@ -501,8 +727,7 @@ export default function App() {
       const qualifyingTracks = tracks.filter((t) => doesTrackMatchRule(t, rule));
       const readyMatches = qualifyingTracks.filter(
         (t) =>
-          t.selectedMatch &&
-          t.selectedMatch.confidence >= rule.filter.minConfidence
+          t.selectedMatch && t.selectedMatch.confidence >= rule.filter.minConfidence
       );
       const allUris = Array.from(
         new Set(readyMatches.map((t) => t.selectedMatch!.uri))
@@ -554,7 +779,7 @@ export default function App() {
       const resp = await fetch(
         `/api/spotify/search?q=${encodeURIComponent(manualSearchQuery)}`,
         {
-          headers: sessionIdToken ? { 'x-spotify-session': sessionIdToken } : {},
+          headers: getAuthHeaders(),
         }
       );
       if (resp.ok) {
@@ -591,7 +816,7 @@ export default function App() {
     }
   };
 
-  // Auto-generate playlist rules from folders or genres
+  // Auto-generate playlist rules from folders
   const handleGenerateRulesFromFolders = () => {
     const existingFolders = new Set(
       playlistRules.map((r) => r.filter.folderContains?.toLowerCase()).filter(Boolean)
@@ -711,7 +936,7 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(sessionIdToken ? { 'x-spotify-session': sessionIdToken } : {}),
+          ...getAuthHeaders(),
         },
         body: JSON.stringify({ playlists: payload }),
       });
@@ -736,7 +961,6 @@ export default function App() {
           data.results.map((r) => [r.localPlaylistId, r])
         );
 
-        // Update playlist rules with newly synced URIs
         setPlaylistRules((prev) =>
           prev.map((rule) => {
             const res = syncedRuleMap.get(rule.id);
@@ -753,7 +977,6 @@ export default function App() {
           })
         );
 
-        // Mark qualifying tracks as synced
         const newlySyncedUris = new Set(
           activePlaylistsToSync.flatMap((ep) => ep.newUrisToAdd)
         );
@@ -770,7 +993,6 @@ export default function App() {
           })
         );
 
-        // Prepend to Sync History
         const newEntries: SyncHistoryEntry[] = data.results.map((r, idx) => ({
           id: `sync_${Date.now()}_${idx}`,
           timestamp: r.timestamp,
@@ -796,8 +1018,8 @@ export default function App() {
     }
   };
 
-  // Export Library Mapping as JSON or M3U8
-  const handleExportSyncReport = (format: 'json' | 'csv' | 'm3u8') => {
+  // Build export payload string for JSON, CSV, or M3U8
+  const buildExportContent = (format: 'json' | 'csv' | 'm3u8') => {
     let content = '';
     let mime = 'application/json';
     let filename = `spotisync-bibliotheek-${new Date().toISOString().slice(0, 10)}.json`;
@@ -866,6 +1088,12 @@ export default function App() {
       content = lines.join('\n');
     }
 
+    return { content, mime, filename };
+  };
+
+  // Export Library Mapping as Browser Download
+  const handleExportSyncReport = (format: 'json' | 'csv' | 'm3u8') => {
+    const { content, mime, filename } = buildExportContent(format);
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -875,6 +1103,38 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // Write Export Directly to Mounted Docker /exports Volume
+  const handleWriteExportToVolume = async (format: 'json' | 'csv' | 'm3u8') => {
+    const { content, filename } = buildExportContent(format);
+    try {
+      const resp = await fetch('/api/server-library/export-to-volume', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({ filename, content }),
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        setNoticeBanner({
+          type: 'success',
+          message: `Bestand rechtstreeks weggeschreven naar je Docker export-volume: ${data.savedPath}`,
+        });
+      } else {
+        setNoticeBanner({
+          type: 'warning',
+          message: data.error || 'Kon niet schrijven naar het export-volume.',
+        });
+      }
+    } catch {
+      setNoticeBanner({
+        type: 'warning',
+        message: 'Netwerkfout bij schrijven naar het server export-volume.',
+      });
+    }
   };
 
   const copyToClipboard = (text: string, key: string) => {
@@ -898,6 +1158,448 @@ export default function App() {
     'https://ais-dev-tzqpzkh4ocjalcl3kqjfzz-636815722959.europe-west3.run.app/auth/callback';
   const sharedCallbackUrl =
     'https://ais-pre-tzqpzkh4ocjalcl3kqjfzz-636815722959.europe-west3.run.app/auth/callback';
+
+  // Generate Dockhand / Docker Compose YAML string dynamically with all 3 volume mappings
+  const generatedDockhandYaml = useMemo(() => {
+    const cleanRepo =
+      stackGitRepoUrl.trim() || 'https://github.com/jouw-gebruikersnaam/spotisync-studio.git';
+    const cleanUser = stackUsername.trim() || 'admin';
+    const rawPass = stackPasswordInput.trim() || 'mijn_veilig_wachtwoord';
+    const passwordEnvLine = useHashedPasswordInYaml
+      ? `# Veilige SHA-256 hash van je wachtwoord (geen platte tekst in YAML!):\n      - APP_PASSWORD_HASH=${stackPasswordHash}`
+      : `# Direct wachtwoord vanuit Docker Compose:\n      - APP_PASSWORD=${rawPass}`;
+
+    const musicMount = stackMusicPath.trim() || '/mnt/nas/muziek';
+    const dataMount = stackDataPath.trim() || 'spotisync_data';
+    const exportsMount = stackExportsPath.trim() || './exports';
+    const isNamedDataVol = !dataMount.startsWith('/') && !dataMount.startsWith('.');
+
+    if (dockhandMode === 'git_clone') {
+      return `# ==============================================================================
+# SpotiSync Studio — Zero-Copy Dockhand Stack (Automatische GitHub Clone)
+# Je hoeft GEEN bestanden handmatig te kopiëren. Plak deze YAML in Dockhand!
+# De container haalt bij het opstarten zelf alle bronbestanden op van GitHub.
+# ==============================================================================
+services:
+  spotisync:
+    image: node:22-alpine
+    container_name: spotisync-studio
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "${stackPort || '3000'}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - GIT_REPO_URL=${cleanRepo}
+      - APP_USERNAME=${cleanUser}
+      ${passwordEnvLine}
+      - SESSION_SECRET=spotisync_dockhand_secret_key_change_me
+      - MUSIC_LIBRARY_PATH=/music
+      - DATA_PATH=/app/data
+      - EXPORTS_PATH=/exports
+      - SPOTIFY_CLIENT_ID=\${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
+      - APP_URL=http://localhost:${stackPort || '3000'}
+    volumes:
+      # 1. Lokale muziekmap op de host/NAS (alleen-lezen)
+      - ${musicMount}:/music:ro
+      # 2. Persistente database & app-status
+      - ${dataMount}:/app/data
+      # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
+      - ${exportsMount}:/exports
+      # 4. Volume voor automatische GitHub clone
+      - spotisync_repo:/app
+    command: >
+      sh -c "apk add --no-cache git &&
+      if [ ! -d /app/.git ]; then
+        git clone $$GIT_REPO_URL /app;
+      else
+        git pull;
+      fi &&
+      npm install &&
+      npm run build &&
+      npm run start"
+
+volumes:
+  spotisync_repo:${isNamedDataVol ? `\n  ${dataMount}:` : ''}`;
+    }
+
+    return `# ==============================================================================
+# SpotiSync Studio — Native Docker Git Build Stack voor Dockhand
+# Docker bouwt de Dockerfile direct vanaf je GitHub-URL zonder lokale bestanden.
+# ==============================================================================
+services:
+  spotisync:
+    build:
+      context: ${cleanRepo.endsWith('.git') ? `${cleanRepo}#main` : cleanRepo}
+      dockerfile: Dockerfile
+    container_name: spotisync-studio
+    restart: unless-stopped
+    ports:
+      - "${stackPort || '3000'}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - APP_USERNAME=${cleanUser}
+      ${passwordEnvLine}
+      - SESSION_SECRET=spotisync_dockhand_secret_key_change_me
+      - MUSIC_LIBRARY_PATH=/music
+      - DATA_PATH=/app/data
+      - EXPORTS_PATH=/exports
+      - SPOTIFY_CLIENT_ID=\${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
+      - APP_URL=http://localhost:${stackPort || '3000'}
+    volumes:
+      # 1. Lokale muziekmap op de host/NAS (alleen-lezen)
+      - ${musicMount}:/music:ro
+      # 2. Persistente database & app-status
+      - ${dataMount}:/app/data
+      # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
+      - ${exportsMount}:/exports
+${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
+  }, [
+    dockhandMode,
+    stackGitRepoUrl,
+    stackUsername,
+    stackPasswordInput,
+    stackPasswordHash,
+    useHashedPasswordInYaml,
+    stackMusicPath,
+    stackDataPath,
+    stackExportsPath,
+    stackPort,
+  ]);
+
+  // Render Dockhand / GitHub Stack Modal (shared between Login screen and main App)
+  const renderDockhandModal = () => {
+    if (!showDockhandModal) return null;
+    return (
+      <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 overflow-y-auto">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl max-w-3xl w-full p-6 space-y-5 shadow-xl my-8">
+          <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
+            <div className="flex items-center gap-2.5">
+              <Server className="w-5 h-5 text-emerald-500 shrink-0" />
+              <div>
+                <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+                  Dockhand Stack, Volume Mapping & GitHub Zero-Copy
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Configureer je volume mappings (`/music`, `/app/data`, `/exports`) en SHA-256
+                  login-hash voor Dockhand.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowDockhandModal(false)}
+              className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Mode Selector */}
+          <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs">
+            <button
+              type="button"
+              onClick={() => setDockhandMode('git_clone')}
+              className={`flex-1 py-2 px-3 font-medium rounded-md transition-colors ${
+                dockhandMode === 'git_clone'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Optie 1: Standalone Git-Clone Container (100% Zero-Copy YAML)
+            </button>
+            <button
+              type="button"
+              onClick={() => setDockhandMode('git_build')}
+              className={`flex-1 py-2 px-3 font-medium rounded-md transition-colors ${
+                dockhandMode === 'git_build'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Optie 2: Native Docker Git Build Context
+            </button>
+          </div>
+
+          {/* Interactive Parameters for the Stack YAML & Volumes */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+            <div className="sm:col-span-2">
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Jouw GitHub Repository URL
+              </label>
+              <input
+                type="text"
+                value={stackGitRepoUrl}
+                onChange={(e) => setStackGitRepoUrl(e.target.value)}
+                placeholder="https://github.com/gebruiker/spotisync-studio.git"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Webinterface Poort (`APP_PORT`)
+              </label>
+              <input
+                type="text"
+                value={stackPort}
+                onChange={(e) => setStackPort(e.target.value)}
+                placeholder="3000"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+
+            {/* Volume Mapping Inputs */}
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Volume 1: Host Muziekmap (`:/music:ro`)
+              </label>
+              <input
+                type="text"
+                value={stackMusicPath}
+                onChange={(e) => setStackMusicPath(e.target.value)}
+                placeholder="/mnt/nas/muziek"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Volume 2: App Data (`:/app/data`)
+              </label>
+              <input
+                type="text"
+                value={stackDataPath}
+                onChange={(e) => setStackDataPath(e.target.value)}
+                placeholder="spotisync_data of ./data"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Volume 3: Playlist Exports (`:/exports`)
+              </label>
+              <input
+                type="text"
+                value={stackExportsPath}
+                onChange={(e) => setStackExportsPath(e.target.value)}
+                placeholder="./exports"
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+
+            {/* Credentials Inputs */}
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Login Gebruikersnaam (`APP_USERNAME`)
+              </label>
+              <input
+                type="text"
+                value={stackUsername}
+                onChange={(e) => setStackUsername(e.target.value)}
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                Gewenst Wachtwoord
+              </label>
+              <input
+                type="text"
+                value={stackPasswordInput}
+                onChange={(e) => setStackPasswordInput(e.target.value)}
+                placeholder="Typ een sterk wachtwoord..."
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <div className="flex flex-col justify-end pb-1">
+              <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={useHashedPasswordInYaml}
+                  onChange={(e) => setUseHashedPasswordInYaml(e.target.checked)}
+                  className="rounded border-slate-400"
+                />
+                <span>Gebruik veilige SHA-256 Hash in YAML</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Generated YAML Code Block */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium text-slate-600 dark:text-slate-300">
+                Kopieer deze `docker-compose.yml` rechtstreeks in Dockhand:
+              </span>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(generatedDockhandYaml, 'dockhand_yaml')}
+                className="px-3 py-1 rounded bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400 transition-colors"
+              >
+                {copiedUrlKey === 'dockhand_yaml'
+                  ? 'YAML Gekopieerd!'
+                  : 'Kopieer Dockhand YAML'}
+              </button>
+            </div>
+            <pre className="p-4 rounded-lg bg-slate-950 text-slate-200 font-mono text-[11px] overflow-x-auto max-h-64 leading-relaxed border border-slate-800">
+              {generatedDockhandYaml}
+            </pre>
+          </div>
+
+          <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+            <span>
+              Zie ook `README.md` in de hoofdmap voor de volledige GitHub- en volume-documentatie.
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowDockhandModal(false)}
+              className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-medium"
+            >
+              Sluiten
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================================
+  // LOGIN SCREEN (Shown when not authenticated)
+  // ============================================================================
+  if (!isCheckingAuth && !appAuthStatus.authenticated) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col justify-between p-6">
+        <div className="max-w-5xl w-full mx-auto flex items-center justify-between">
+          <span className="text-lg font-bold tracking-tight font-display">
+            SpotiSync Studio
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setShowDockhandModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-emerald-500 transition-colors"
+            >
+              <Server className="w-3.5 h-3.5 text-emerald-500" />
+              <span>Dockhand Stack YAML</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setDarkMode((d) => !d)}
+              className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400"
+              aria-label="Wissel thema"
+            >
+              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        <div className="max-w-md w-full mx-auto border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-slate-900 p-6 sm:p-8 space-y-6">
+          <div className="space-y-1.5">
+            <div className="inline-flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              <Lock className="w-3.5 h-3.5" />
+              <span>Beveiligde Toegang</span>
+            </div>
+            <h1 className="text-xl font-bold text-slate-900 dark:text-white font-display">
+              Inloggen bij SpotiSync Studio
+            </h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              Meld je aan met de inloggegevens uit je{' '}
+              <span className="font-mono">docker-compose.yml</span> (
+              <span className="font-mono">APP_USERNAME</span> en{' '}
+              <span className="font-mono">APP_PASSWORD</span> of{' '}
+              <span className="font-mono">APP_PASSWORD_HASH</span>).
+            </p>
+          </div>
+
+          {appAuthStatus.usingDefaultCredentials && (
+            <div className="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-xs text-amber-800 dark:text-amber-200 space-y-2">
+              <div className="font-semibold">Standaard preview-wachtwoord actief</div>
+              <p className="text-[11px] leading-relaxed opacity-90">
+                Er is nog geen eigen <span className="font-mono">APP_PASSWORD</span> of{' '}
+                <span className="font-mono">APP_PASSWORD_HASH</span> ingesteld. Gebruik{' '}
+                <span className="font-mono font-semibold">admin</span> /{' '}
+                <span className="font-mono font-semibold">spotisync</span> om in te loggen.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginUsername('admin');
+                  setLoginPassword('spotisync');
+                }}
+                className="px-2.5 py-1 text-[11px] font-semibold rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-100 transition-colors"
+              >
+                Vul standaard inloggegevens in
+              </button>
+            </div>
+          )}
+
+          {loginError && (
+            <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-600 dark:text-rose-300">
+              {loginError}
+            </div>
+          )}
+
+          <form onSubmit={handleAppLogin} className="space-y-4 text-xs">
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                Gebruikersnaam
+              </label>
+              <input
+                type="text"
+                required
+                autoComplete="username"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            <div>
+              <label className="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                Wachtwoord
+              </label>
+              <input
+                type="password"
+                required
+                autoComplete="current-password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Voer je wachtwoord in..."
+                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoggingIn}
+              className="w-full py-2.5 px-4 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold transition-colors"
+            >
+              {isLoggingIn ? 'Bezig met aanmelden...' : 'Inloggen'}
+            </button>
+          </form>
+
+          <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+            <span>Beveiliging: {appAuthStatus.authMode}</span>
+            <button
+              type="button"
+              onClick={() => setShowDockhandModal(true)}
+              className="text-emerald-600 dark:text-emerald-400 hover:underline font-medium"
+            >
+              Genereer Dockhand YAML & Volumes
+            </button>
+          </div>
+        </div>
+
+        <footer className="max-w-5xl w-full mx-auto text-center text-xs text-slate-500 dark:text-slate-500">
+          SpotiSync Studio · Lokale Muziekbibliotheek & Spotify Synchronisatie
+        </footer>
+
+        {renderDockhandModal()}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
@@ -1039,7 +1741,7 @@ export default function App() {
               ))}
             </div>
 
-            {/* Quick Upload Actions */}
+            {/* Quick Upload & Docker Server Volume Actions */}
             <div className="space-y-2">
               <div className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                 Lokale Bronbestanden
@@ -1051,7 +1753,18 @@ export default function App() {
               >
                 <span className="flex items-center gap-2 truncate">
                   <FolderOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                  <span>Scan Muziekmap</span>
+                  <span>Scan Browser Map</span>
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              </button>
+              <button
+                type="button"
+                onClick={handleScanServerVolume}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-200 transition-colors whitespace-nowrap"
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <HardDrive className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>Scan Docker Volume (/music)</span>
                 </span>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               </button>
@@ -1062,7 +1775,7 @@ export default function App() {
               >
                 <span className="flex items-center gap-2 truncate">
                   <Upload className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
-                  <span>Importeer Losse Audio / M3U8</span>
+                  <span>Importeer Audio / M3U8</span>
                 </span>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               </button>
@@ -1155,8 +1868,26 @@ export default function App() {
             </div>
           </div>
 
-          {/* Bottom Sidebar Controls: Spotify OAuth Status & Theme Toggle */}
+          {/* Bottom Sidebar Controls: Dockhand & Volume Config, Spotify OAuth & Logout */}
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+            <button
+              type="button"
+              onClick={() => setShowDockhandModal(true)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+            >
+              <span className="flex items-center gap-2 truncate">
+                <Server className="w-3.5 h-3.5 shrink-0" />
+                <span>Dockhand & Volumes</span>
+              </span>
+              <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+            </button>
+
+            <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 space-y-0.5">
+              <div>Volume 1: {appAuthStatus.musicLibraryPath} (:ro)</div>
+              <div>Volume 2: {appAuthStatus.dataPath || '/app/data'} (:rw)</div>
+              <div>Volume 3: {appAuthStatus.exportsPath || '/exports'} (:rw)</div>
+            </div>
+
             <div className="text-xs space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="font-medium text-slate-700 dark:text-slate-300">
@@ -1173,14 +1904,14 @@ export default function App() {
               {spotifyAuth.connected && spotifyAuth.user ? (
                 <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
                   <span className="truncate">
-                    Ingelogd: {spotifyAuth.user.display_name}
+                    Spotify: {spotifyAuth.user.display_name}
                   </span>
                   <button
                     type="button"
                     onClick={handleDisconnectSpotify}
                     className="text-rose-600 dark:text-rose-400 hover:underline ml-2 shrink-0"
                   >
-                    Log uit
+                    Ontkoppel
                   </button>
                 </div>
               ) : (
@@ -1201,33 +1932,29 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setDarkMode((d) => !d)}
-                className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors whitespace-nowrap"
               >
                 {darkMode ? (
                   <>
                     <Sun className="w-3.5 h-3.5" />
-                    <span>Licht Thema</span>
+                    <span>Licht</span>
                   </>
                 ) : (
                   <>
                     <Moon className="w-3.5 h-3.5" />
-                    <span>Donker Thema</span>
+                    <span>Donker</span>
                   </>
                 )}
               </button>
+
               <button
                 type="button"
-                onClick={() => {
-                  setTracks(INITIAL_LOCAL_LIBRARY);
-                  setPlaylistRules(INITIAL_PLAYLIST_RULES);
-                  setNoticeBanner({
-                    type: 'info',
-                    message: 'Voorbeeldbibliotheek en standaardregels hersteld.',
-                  });
-                }}
-                className="text-[11px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-300 transition-colors whitespace-nowrap"
+                onClick={handleAppLogout}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors whitespace-nowrap"
+                title={`Uitloggen (${appAuthStatus.username})`}
               >
-                Reset Demo
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Uitloggen</span>
               </button>
             </div>
           </div>
@@ -1345,15 +2072,16 @@ export default function App() {
               >
                 <div className="space-y-1">
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Lokale Muziekbibliotheek & Binary Tag Scanner
+                    Lokale Muziekbibliotheek & Docker Volume Scanner
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 max-w-2xl">
-                    Sleep je lokale muziekmap of audiobestanden hierheen. De scanner leest direct{' '}
+                    Sleep je lokale muziekmap hierheen of scan direct het gemounte Docker-volume (
+                    <span className="font-mono">{appAuthStatus.musicLibraryPath}</span>). Leest{' '}
                     <span className="font-mono">ID3v2.4</span>,{' '}
                     <span className="font-mono">FLAC Vorbis</span>,{' '}
-                    <span className="font-mono">ISRC</span>, <span className="font-mono">BPM</span>{' '}
-                    en <span className="font-mono">.M3U8</span> afspeellijsten uit zonder de
-                    audiobestanden te hoeven uploaden.
+                    <span className="font-mono">ISRC</span> en{' '}
+                    <span className="font-mono">.M3U8</span> en slaat de status op in{' '}
+                    <span className="font-mono">{appAuthStatus.dataPath || '/app/data'}</span>.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -1362,14 +2090,14 @@ export default function App() {
                     onClick={() => folderInputRef.current?.click()}
                     className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 hover:opacity-90 transition-opacity whitespace-nowrap shrink-0"
                   >
-                    Selecteer Lokale Map
+                    Selecteer Browser Map
                   </button>
                   <button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={handleScanServerVolume}
                     className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
                   >
-                    Kies Bestanden / .M3U8
+                    Scan Docker Volume (/music)
                   </button>
                   <button
                     type="button"
@@ -1387,7 +2115,6 @@ export default function App() {
 
               {/* Filter & Search Toolbar */}
               <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-                {/* Interactive Segmented Status Filter */}
                 <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-x-auto">
                   {(
                     [
@@ -1429,7 +2156,6 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Search & Format Filter */}
                 <div className="flex items-center gap-2.5">
                   <div className="relative flex-1 sm:w-64">
                     <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -1486,7 +2212,6 @@ export default function App() {
                           return (
                             <React.Fragment key={trk.id}>
                               <tr className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
-                                {/* Col 1: Title, Artist & Local Path */}
                                 <td className="py-3 px-4 max-w-xs">
                                   <div className="font-semibold text-slate-900 dark:text-slate-100 truncate">
                                     {trk.title}
@@ -1499,7 +2224,6 @@ export default function App() {
                                   </div>
                                 </td>
 
-                                {/* Col 2: Unboxed Metadata with · separators */}
                                 <td className="py-3 px-4">
                                   <div className="text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
                                     {trk.album}
@@ -1525,7 +2249,6 @@ export default function App() {
                                   </div>
                                 </td>
 
-                                {/* Col 3: Format, Bitrate, Tag Source */}
                                 <td className="py-3 px-4 whitespace-nowrap">
                                   <div className="text-xs font-mono tabular-nums text-slate-800 dark:text-slate-200">
                                     {trk.format} · {trk.bitrateKbps} kbps
@@ -1536,12 +2259,10 @@ export default function App() {
                                   </div>
                                 </td>
 
-                                {/* Col 4: Duration */}
                                 <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                                   {formatDuration(trk.durationSec)}
                                 </td>
 
-                                {/* Col 5: Spotify Match Status (paired icon + explicit text label) */}
                                 <td className="py-3 px-4">
                                   {trk.selectedMatch ? (
                                     <div>
@@ -1572,7 +2293,6 @@ export default function App() {
                                   )}
                                 </td>
 
-                                {/* Col 6: Actions */}
                                 <td className="py-3 px-4 text-right whitespace-nowrap">
                                   <div className="inline-flex items-center gap-2">
                                     <button
@@ -1612,7 +2332,6 @@ export default function App() {
                                 </td>
                               </tr>
 
-                              {/* Inline Metadata Editor Drawer */}
                               {isEditing && (
                                 <tr className="bg-slate-100/70 dark:bg-slate-800/60">
                                   <td colSpan={6} className="p-4">
@@ -1744,7 +2463,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Manual Search Box when a specific track is selected for manual lookup */}
               {manualSearchTrackId && (
                 <div className="border border-emerald-500/40 rounded-lg bg-white dark:bg-slate-900 p-4 space-y-3">
                   <div className="flex items-center justify-between">
@@ -1819,7 +2537,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Matcher Comparison Rows */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 divide-y divide-slate-200 dark:divide-slate-800">
                 {tracks.map((trk) => {
                   const durationDelta = trk.selectedMatch
@@ -1827,8 +2544,10 @@ export default function App() {
                     : 0;
 
                   return (
-                    <div key={trk.id} className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                      {/* Left: Local Audio File Info */}
+                    <div
+                      key={trk.id}
+                      className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                    >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 text-xs">
                           <span className="font-semibold text-slate-900 dark:text-white truncate">
@@ -1841,7 +2560,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Center: Selected Spotify Candidate & Alternative Versions */}
                       <div className="flex-1 min-w-0">
                         {trk.selectedMatch ? (
                           <div className="space-y-1">
@@ -1861,12 +2579,9 @@ export default function App() {
                                 : ' (Exacte speelduur)'}
                             </div>
 
-                            {/* Candidate Version Switcher if multiple candidates exist */}
                             {trk.candidates.length > 1 && (
                               <div className="pt-1.5 flex flex-wrap items-center gap-2">
-                                <span className="text-[11px] text-slate-400">
-                                  Alternatieven:
-                                </span>
+                                <span className="text-[11px] text-slate-400">Alternatieven:</span>
                                 {trk.candidates.map((cand) => {
                                   const isCurrent =
                                     trk.selectedMatch?.spotifyId === cand.spotifyId;
@@ -1896,7 +2611,6 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Right: Action Buttons */}
                       <div className="flex items-center gap-2 shrink-0">
                         {trk.matchStatus === 'review' && trk.selectedMatch && (
                           <button
@@ -1970,7 +2684,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* New Smart Rule Builder Form */}
               {showNewRuleForm && (
                 <form
                   onSubmit={handleCreateCustomRule}
@@ -2123,9 +2836,7 @@ export default function App() {
                 </form>
               )}
 
-              {/* Split View: Playlist Rules Grid + Selected Rule Tracklist */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                {/* Left 5 columns: All Auto-Playlist Rules */}
                 <div className="lg:col-span-5 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 divide-y divide-slate-200 dark:divide-slate-800">
                   {evaluatedPlaylists.map((ep) => {
                     const isSelected = activePlaylistEval?.rule.id === ep.rule.id;
@@ -2174,7 +2885,6 @@ export default function App() {
                   })}
                 </div>
 
-                {/* Right 7 columns: Selected Playlist Preview & Tracks */}
                 <div className="lg:col-span-7 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
                   {activePlaylistEval ? (
                     <div>
@@ -2261,21 +2971,30 @@ export default function App() {
           )}
 
           {/* ===================================================================
-              VIEW 4: DIFFERENTIËLE SYNCHRONISATIE & EXPORT
+              VIEW 4: DIFFERENTIËLE SYNCHRONISATIE & VOLUME EXPORT
              =================================================================== */}
           {activeTab === 'sync' && (
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
                 <div>
                   <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Differentiële Bibliotheek-Synchronisatie
+                    Differentiële Bibliotheek-Synchronisatie & Volume Export
                   </h1>
                   <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                    Berekent het exacte verschil (diff) tussen je lokale muziekcollectie en je
-                    Spotify-afspeellijsten zodat bestaande nummers nooit dubbel worden toegevoegd.
+                    Synchroniseer nieuwe nummers naar Spotify of schrijf `.m3u8` / `.json` / `.csv`
+                    afspeellijsten rechtstreeks naar het gemounte Docker-volume (
+                    <span className="font-mono">{appAuthStatus.exportsPath || '/exports'}</span>).
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleWriteExportToVolume('m3u8')}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 transition-colors whitespace-nowrap"
+                  >
+                    <HardDrive className="w-3.5 h-3.5" />
+                    <span>Schrijf .M3U8 naar /exports</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => handleExportSyncReport('json')}
@@ -2294,14 +3013,6 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleExportSyncReport('m3u8')}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Exporteer .M3U8</span>
-                  </button>
-                  <button
-                    type="button"
                     onClick={handleRunDifferentialSync}
                     disabled={isSyncing}
                     className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-colors whitespace-nowrap"
@@ -2313,7 +3024,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Differential Sync Queue Table */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
                 <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-slate-900 dark:text-white">
@@ -2380,7 +3090,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Sync History Log */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 overflow-hidden">
                 <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800">
                   <h2 className="text-xs font-semibold text-slate-900 dark:text-white">
@@ -2430,6 +3139,8 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {renderDockhandModal()}
 
       {/* Spotify OAuth Configuration & Redirect URI Modal */}
       {showOAuthModal && (

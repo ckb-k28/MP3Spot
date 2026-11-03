@@ -1,7 +1,8 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 
 dotenv.config();
@@ -40,12 +41,170 @@ interface SpotifyCandidate {
   releaseYear: number;
   isrc?: string;
   confidence: number;
-  matchMethod: 'ISRC Exact' | 'Titel & Artiest Exact' | 'Fuzzy Metadata Match' | 'Handmatig Gekoppeld';
+  matchMethod:
+    | 'ISRC Exact'
+    | 'Titel & Artiest Exact'
+    | 'Fuzzy Metadata Match'
+    | 'Handmatig Gekoppeld';
   externalUrl: string;
 }
 
 const sessions = new Map<string, SpotifySession>();
 let clientCredentialsToken: { token: string; expiresAt: number } | null = null;
+
+// ============================================================================
+// Volume Paths Configuration (/music, /app/data, /exports)
+// ============================================================================
+const MUSIC_LIBRARY_PATH = process.env.MUSIC_LIBRARY_PATH || '/music';
+const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), 'data');
+const EXPORTS_PATH = process.env.EXPORTS_PATH || path.join(process.cwd(), 'exports');
+
+for (const dir of [DATA_PATH, EXPORTS_PATH]) {
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {
+    // Ignore permission errors in read-only sandbox environments
+  }
+}
+
+const STATE_FILE_PATH = path.join(DATA_PATH, 'spotisync-state.json');
+
+// ============================================================================
+// App Login & Docker Compose Authentication System
+// Supports:
+//   1. APP_USERNAME (default: "admin")
+//   2. APP_PASSWORD_HASH (recommended: SHA-256 hex digest so no plaintext in YAML)
+//   3. APP_PASSWORD_FILE (Docker Secrets file path, e.g. /run/secrets/app_password)
+//   4. APP_PASSWORD (direct environment variable in docker-compose.yml)
+// ============================================================================
+const SERVER_SESSION_SECRET =
+  process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex').toLowerCase();
+}
+
+function getConfiguredAuthConfig(): {
+  username: string;
+  expectedPasswordHash: string;
+  authMode: 'password_hash' | 'docker_secret_file' | 'env_password' | 'default_fallback';
+  usingDefaultCredentials: boolean;
+} {
+  const username = (process.env.APP_USERNAME || 'admin').trim();
+
+  if (process.env.APP_PASSWORD_HASH && process.env.APP_PASSWORD_HASH.trim().length === 64) {
+    return {
+      username,
+      expectedPasswordHash: process.env.APP_PASSWORD_HASH.trim().toLowerCase(),
+      authMode: 'password_hash',
+      usingDefaultCredentials: false,
+    };
+  }
+
+  if (process.env.APP_PASSWORD_FILE) {
+    try {
+      const secretFromFile = fs.readFileSync(process.env.APP_PASSWORD_FILE, 'utf8').trim();
+      if (secretFromFile) {
+        return {
+          username,
+          expectedPasswordHash: sha256Hex(secretFromFile),
+          authMode: 'docker_secret_file',
+          usingDefaultCredentials: false,
+        };
+      }
+    } catch {
+      // Fall through if secret file is not readable
+    }
+  }
+
+  if (process.env.APP_PASSWORD && process.env.APP_PASSWORD.trim().length > 0) {
+    return {
+      username,
+      expectedPasswordHash: sha256Hex(process.env.APP_PASSWORD.trim()),
+      authMode: 'env_password',
+      usingDefaultCredentials: false,
+    };
+  }
+
+  // Fallback for preview / first boot before docker-compose env vars are set
+  return {
+    username,
+    expectedPasswordHash: sha256Hex('spotisync'),
+    authMode: 'default_fallback',
+    usingDefaultCredentials: true,
+  };
+}
+
+function createSignedAppToken(username: string): string {
+  const exp = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+  const payload = Buffer.from(JSON.stringify({ u: username, exp })).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SERVER_SESSION_SECRET)
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifySignedAppToken(token?: string): { valid: boolean; username?: string } {
+  if (!token || !token.includes('.')) return { valid: false };
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return { valid: false };
+
+  const expectedSig = crypto
+    .createHmac('sha256', SERVER_SESSION_SECRET)
+    .update(payload)
+    .digest('base64url');
+
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { valid: false };
+  }
+
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!decoded.exp || Date.now() > decoded.exp) {
+      return { valid: false };
+    }
+    return { valid: true, username: decoded.u };
+  } catch {
+    return { valid: false };
+  }
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const list: Record<string, string> = {};
+  if (!cookieHeader) return list;
+  cookieHeader.split(';').forEach((cookie) => {
+    const parts = cookie.split('=');
+    const key = parts.shift()?.trim();
+    if (key) {
+      list[key] = decodeURIComponent(parts.join('='));
+    }
+  });
+  return list;
+}
+
+function getAppAuthFromReq(req: Request): { authenticated: boolean; username?: string } {
+  const headerToken = req.headers['x-app-auth-token'] as string | undefined;
+  const cookies = parseCookies(req.headers.cookie);
+  const token = headerToken || cookies['spotisync_app_auth'];
+  const verified = verifySignedAppToken(token);
+  return { authenticated: verified.valid, username: verified.username };
+}
+
+function requireAppAuth(req: Request, res: Response, next: NextFunction) {
+  const auth = getAppAuthFromReq(req);
+  if (!auth.authenticated) {
+    res.status(401).json({ error: 'Niet geautoriseerd. Log eerst in.' });
+    return;
+  }
+  next();
+}
 
 // Curated reference catalog of well-known tracks for instant high-precision matching
 const REFERENCE_CATALOG: Array<{
@@ -221,19 +380,6 @@ const REFERENCE_CATALOG: Array<{
   },
 ];
 
-function parseCookies(cookieHeader?: string): Record<string, string> {
-  const list: Record<string, string> = {};
-  if (!cookieHeader) return list;
-  cookieHeader.split(';').forEach((cookie) => {
-    const parts = cookie.split('=');
-    const key = parts.shift()?.trim();
-    if (key) {
-      list[key] = decodeURIComponent(parts.join('='));
-    }
-  });
-  return list;
-}
-
 function getSessionFromReq(req: Request): SpotifySession | null {
   const headerSessionId = req.headers['x-spotify-session'] as string | undefined;
   const cookies = parseCookies(req.headers.cookie);
@@ -359,7 +505,6 @@ async function getSpotifyAccessToken(req: Request): Promise<string | null> {
     }
   }
 
-  // Fallback to Client Credentials flow if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set
   if (clientId && clientSecret) {
     if (clientCredentialsToken && Date.now() < clientCredentialsToken.expiresAt - 30000) {
       return clientCredentialsToken.token;
@@ -396,7 +541,6 @@ async function searchTrackCandidates(
   local: LocalTrackInput,
   spotifyToken: string | null
 ): Promise<SpotifyCandidate[]> {
-  // 1. Live Spotify Web API Search when token is available
   if (spotifyToken) {
     try {
       const cleanTitle = normalizeString(local.title) || local.title;
@@ -426,7 +570,8 @@ async function searchTrackCandidates(
             const candidates: SpotifyCandidate[] = items.map((item: any) => {
               const artistName = (item.artists || []).map((a: any) => a.name).join(', ');
               const durationSec = Math.round((item.duration_ms || 200000) / 1000);
-              const releaseYear = parseInt((item.album?.release_date || '2020').slice(0, 4), 10) || 2020;
+              const releaseYear =
+                parseInt((item.album?.release_date || '2020').slice(0, 4), 10) || 2020;
               const isrc = item.external_ids?.isrc;
               const { confidence, matchMethod } = computeCandidateConfidence(local, {
                 title: item.name,
@@ -447,7 +592,8 @@ async function searchTrackCandidates(
                 isrc,
                 confidence,
                 matchMethod,
-                externalUrl: item.external_urls?.spotify || `https://open.spotify.com/track/${item.id}`,
+                externalUrl:
+                  item.external_urls?.spotify || `https://open.spotify.com/track/${item.id}`,
               };
             });
 
@@ -461,7 +607,6 @@ async function searchTrackCandidates(
     }
   }
 
-  // 2. Public iTunes / Apple Music Metadata Bridge + Local Reference Index for zero-key instant matching
   try {
     const queryTerm = `${local.artist} ${local.title}`.trim();
     const itunesUrl = `https://itunes.apple.com/search?${new URLSearchParams({
@@ -518,7 +663,6 @@ async function searchTrackCandidates(
     // Continue to local reference catalog fallback
   }
 
-  // 3. Local Reference Catalog & Deterministic Matcher
   const scoredRef = REFERENCE_CATALOG.map((item) => {
     const { confidence, matchMethod } = computeCandidateConfidence(local, item);
     return {
@@ -540,7 +684,6 @@ async function searchTrackCandidates(
     return scoredRef.slice(0, 3);
   }
 
-  // Generate clean candidate from cleaned local tags so user can inspect/verify
   const cleanTitle = local.title.replace(/\.(mp3|flac|m4a|wav|ogg)$/i, '');
   const hashId = crypto
     .createHash('md5')
@@ -568,14 +711,379 @@ async function searchTrackCandidates(
   ];
 }
 
+// Extract ID3v2 frames from server-side file buffer
+function extractServerID3Tags(bytes: Uint8Array): Partial<{
+  title: string;
+  artist: string;
+  album: string;
+  genre: string;
+  year: number;
+  bpm: number;
+  key: string;
+  isrc: string;
+  tagSource: string;
+}> {
+  if (bytes.length <= 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) {
+    return {};
+  }
+  const versionMajor = bytes[3];
+  const tagSize =
+    ((bytes[6] & 0x7f) << 21) |
+    ((bytes[7] & 0x7f) << 14) |
+    ((bytes[8] & 0x7f) << 7) |
+    (bytes[9] & 0x7f);
+  const maxOffset = Math.min(bytes.length, 10 + tagSize);
+  let offset = 10;
+  const out: any = { tagSource: versionMajor === 4 ? 'ID3v2.4' : 'ID3v2.3' };
+
+  while (offset + 10 < maxOffset) {
+    const frameId = String.fromCharCode(
+      bytes[offset],
+      bytes[offset + 1],
+      bytes[offset + 2],
+      bytes[offset + 3]
+    );
+    if (!/^[A-Z0-9]{4}$/.test(frameId)) break;
+
+    const frameSize =
+      versionMajor === 4
+        ? ((bytes[offset + 4] & 0x7f) << 21) |
+          ((bytes[offset + 5] & 0x7f) << 14) |
+          ((bytes[offset + 6] & 0x7f) << 7) |
+          (bytes[offset + 7] & 0x7f)
+        : (bytes[offset + 4] << 24) |
+          (bytes[offset + 5] << 16) |
+          (bytes[offset + 6] << 8) |
+          bytes[offset + 7];
+
+    if (frameSize <= 0 || offset + 10 + frameSize > bytes.length) break;
+    const payload = bytes.subarray(offset + 11, offset + 10 + frameSize);
+    const encoding = bytes[offset + 10];
+    let text = '';
+    try {
+      text = Buffer.from(payload)
+        .toString(encoding === 1 ? 'utf16le' : 'utf8')
+        .replace(/\0/g, '')
+        .trim();
+    } catch {
+      text = '';
+    }
+    if (text) {
+      if (frameId === 'TIT2') out.title = text;
+      else if (frameId === 'TPE1') out.artist = text;
+      else if (frameId === 'TALB') out.album = text;
+      else if (frameId === 'TCON') out.genre = text;
+      else if (frameId === 'TYER' || frameId === 'TDRC') {
+        const y = parseInt(text.slice(0, 4), 10);
+        if (y >= 1950 && y <= 2030) out.year = y;
+      } else if (frameId === 'TBPM') {
+        const b = Math.round(parseFloat(text));
+        if (b >= 50 && b <= 220) out.bpm = b;
+      } else if (frameId === 'TKEY') out.key = text;
+      else if (frameId === 'TSRC') out.isrc = text;
+    }
+    offset += 10 + frameSize;
+  }
+  return out;
+}
+
+// Recursively scan mounted /music folder on Docker host
+async function scanMountedMusicDirectory(rootDir: string, maxFiles = 500): Promise<any[]> {
+  const discovered: any[] = [];
+  const audioExtensions = new Set(['.mp3', '.flac', '.m4a', '.wav', '.aiff', '.ogg']);
+
+  async function walk(currentDir: string) {
+    if (discovered.length >= maxFiles) return;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (discovered.length >= maxFiles) break;
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith('.')) {
+          await walk(fullPath);
+        }
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (audioExtensions.has(ext)) {
+          try {
+            const stat = await fs.promises.stat(fullPath);
+            const fileSizeMB = Number((stat.size / (1024 * 1024)).toFixed(2));
+            const relFolder = path.dirname(fullPath).replace(/\\/g, '/') || '/music';
+            const format = ext.slice(1).toUpperCase();
+            const withoutExt = entry.name.replace(/\.[a-zA-Z0-9]{2,5}$/, '');
+            const strippedNum = withoutExt.replace(/^\d{1,3}[\s._-]+/, '').trim();
+            const parts = strippedNum.split(/\s+[-–—]\s+/);
+            let artist = parts.length >= 2 ? parts[0].trim() : 'Onbekende Artiest';
+            let title = parts.length >= 2 ? parts.slice(1).join(' - ').trim() : strippedNum;
+            const folderLeaf = relFolder.split('/').filter(Boolean).pop() || 'Server Collectie';
+            let album = folderLeaf;
+            let genre = folderLeaf;
+            let year = new Date(stat.mtime).getFullYear() || 2023;
+            let bpm = 124;
+            let musicalKey = '8A';
+            let isrc: string | undefined = undefined;
+            let tagSource = format === 'FLAC' ? 'FLAC Vorbis' : 'Bestandsnaam';
+
+            // Read first 64KB of file from mounted volume to extract real ID3 tags
+            try {
+              const fh = await fs.promises.open(fullPath, 'r');
+              const buf = Buffer.alloc(Math.min(65536, stat.size));
+              await fh.read(buf, 0, buf.length, 0);
+              await fh.close();
+              const id3 = extractServerID3Tags(new Uint8Array(buf));
+              if (id3.title) title = id3.title;
+              if (id3.artist) artist = id3.artist;
+              if (id3.album) album = id3.album;
+              if (id3.genre) genre = id3.genre;
+              if (id3.year) year = id3.year;
+              if (id3.bpm) bpm = id3.bpm;
+              if (id3.key) musicalKey = id3.key;
+              if (id3.isrc) isrc = id3.isrc;
+              if (id3.tagSource) tagSource = id3.tagSource;
+            } catch {
+              // Keep filename fallback
+            }
+
+            discovered.push({
+              id: `srv_${crypto.createHash('md5').update(fullPath).digest('hex').slice(0, 10)}`,
+              fileName: entry.name,
+              folderPath: relFolder,
+              format: ['FLAC', 'MP3', 'M4A', 'WAV', 'AIFF', 'OGG'].includes(format)
+                ? format
+                : 'MP3',
+              fileSizeMB: Math.max(0.5, fileSizeMB),
+              bitrateKbps: format === 'FLAC' || format === 'WAV' ? 1411 : 320,
+              sampleRateHz: format === 'FLAC' || format === 'WAV' ? 48000 : 44100,
+              title,
+              artist,
+              album,
+              genre,
+              year,
+              bpm,
+              musicalKey,
+              isrc,
+              durationSec:
+                format === 'FLAC' || format === 'WAV'
+                  ? Math.max(120, Math.round((fileSizeMB * 8192) / 950))
+                  : Math.max(120, Math.round((fileSizeMB * 8192) / 320)),
+              tagSource,
+              matchStatus: 'unmatched',
+              candidates: [],
+              syncedPlaylistIds: [],
+            });
+          } catch {
+            // Skip unreadable file
+          }
+        }
+      }
+    }
+  }
+
+  await walk(rootDir);
+  return discovered;
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '15mb' }));
+
+  // ==========================================================================
+  // 0. App Login, Volume Status & Security Endpoints
+  // ==========================================================================
+  app.get('/api/app-auth/status', (req: Request, res: Response) => {
+    const auth = getAppAuthFromReq(req);
+    const config = getConfiguredAuthConfig();
+    let musicMountAvailable = false;
+    let dataMountAvailable = false;
+    let exportsMountAvailable = false;
+    try {
+      musicMountAvailable = fs.existsSync(MUSIC_LIBRARY_PATH);
+      dataMountAvailable = fs.existsSync(DATA_PATH);
+      exportsMountAvailable = fs.existsSync(EXPORTS_PATH);
+    } catch {
+      // Ignore
+    }
+
+    res.json({
+      authenticated: auth.authenticated,
+      username: auth.username || config.username,
+      configuredUsername: config.username,
+      authMode: config.authMode,
+      usingDefaultCredentials: config.usingDefaultCredentials,
+      musicLibraryPath: MUSIC_LIBRARY_PATH,
+      musicMountAvailable,
+      dataPath: DATA_PATH,
+      dataMountAvailable,
+      exportsPath: EXPORTS_PATH,
+      exportsMountAvailable,
+    });
+  });
+
+  app.post('/api/app-auth/login', (req: Request, res: Response) => {
+    const ip =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
+
+    const now = Date.now();
+    const rateRecord = loginAttempts.get(ip);
+    if (rateRecord && now < rateRecord.resetAt && rateRecord.count >= 8) {
+      const waitSec = Math.ceil((rateRecord.resetAt - now) / 1000);
+      res.status(429).json({
+        error: `Te veel mislukte inlogpogingen. Probeer het over ${waitSec} seconden opnieuw.`,
+      });
+      return;
+    }
+
+    const { username, password } = req.body as { username?: string; password?: string };
+    const config = getConfiguredAuthConfig();
+
+    const inputUser = (username || '').trim();
+    const inputPassHash = sha256Hex((password || '').trim());
+
+    const userMatches =
+      inputUser.length === config.username.length &&
+      crypto.timingSafeEqual(Buffer.from(inputUser), Buffer.from(config.username));
+
+    const passMatches =
+      inputPassHash.length === config.expectedPasswordHash.length &&
+      crypto.timingSafeEqual(
+        Buffer.from(inputPassHash),
+        Buffer.from(config.expectedPasswordHash)
+      );
+
+    if (!userMatches || !passMatches) {
+      const prevCount = rateRecord && now < rateRecord.resetAt ? rateRecord.count : 0;
+      loginAttempts.set(ip, { count: prevCount + 1, resetAt: now + 5 * 60 * 1000 });
+      res.status(401).json({
+        error: 'Ongeldige gebruikersnaam of wachtwoord.',
+      });
+      return;
+    }
+
+    loginAttempts.delete(ip);
+    const token = createSignedAppToken(config.username);
+
+    res.cookie('spotisync_app_auth', token, {
+      secure: true,
+      sameSite: 'none',
+      httpOnly: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.json({
+      authenticated: true,
+      username: config.username,
+      token,
+      authMode: config.authMode,
+      usingDefaultCredentials: config.usingDefaultCredentials,
+    });
+  });
+
+  app.post('/api/app-auth/logout', (_req: Request, res: Response) => {
+    res.clearCookie('spotisync_app_auth', {
+      secure: true,
+      sameSite: 'none',
+      httpOnly: true,
+    });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/app-auth/hash-password', requireAppAuth, (req: Request, res: Response) => {
+    const { password } = req.body as { password?: string };
+    if (!password) {
+      res.status(400).json({ error: 'Geef een wachtwoord op.' });
+      return;
+    }
+    res.json({
+      sha256Hash: sha256Hex(password),
+    });
+  });
+
+  // --- Persistent State on Mounted /app/data Volume ---
+  app.get('/api/server-state', requireAppAuth, async (_req: Request, res: Response) => {
+    try {
+      if (fs.existsSync(STATE_FILE_PATH)) {
+        const raw = await fs.promises.readFile(STATE_FILE_PATH, 'utf8');
+        res.json({ exists: true, state: JSON.parse(raw) });
+        return;
+      }
+    } catch {
+      // Ignore read errors
+    }
+    res.json({ exists: false, state: null });
+  });
+
+  app.post('/api/server-state', requireAppAuth, async (req: Request, res: Response) => {
+    try {
+      await fs.promises.mkdir(DATA_PATH, { recursive: true });
+      await fs.promises.writeFile(
+        STATE_FILE_PATH,
+        JSON.stringify(req.body, null, 2),
+        'utf8'
+      );
+      res.json({ ok: true, savedTo: STATE_FILE_PATH });
+    } catch (err) {
+      res.status(500).json({ error: `Kon status niet opslaan in ${STATE_FILE_PATH}` });
+    }
+  });
+
+  // --- Direct Export of Playlists (.m3u8, .json, .csv) to Mounted /exports Volume ---
+  app.post(
+    '/api/server-library/export-to-volume',
+    requireAppAuth,
+    async (req: Request, res: Response) => {
+      const { filename, content } = req.body as { filename?: string; content?: string };
+      if (!filename || typeof content !== 'string') {
+        res.status(400).json({ error: 'Bestandsnaam en inhoud zijn verplicht.' });
+        return;
+      }
+      const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fullDest = path.join(EXPORTS_PATH, safeName);
+      try {
+        await fs.promises.mkdir(EXPORTS_PATH, { recursive: true });
+        await fs.promises.writeFile(fullDest, content, 'utf8');
+        res.json({
+          ok: true,
+          savedPath: fullDest,
+        });
+      } catch (err) {
+        res.status(500).json({
+          error: `Kon niet schrijven naar export-volume (${fullDest}). Controleer de schrijfrechten van je Docker volume.`,
+        });
+      }
+    }
+  );
+
+  // --- Scan Mounted Docker Music Volume (/music) ---
+  app.post('/api/server-library/scan', requireAppAuth, async (req: Request, res: Response) => {
+    const targetPath = (req.body?.path as string)?.trim() || MUSIC_LIBRARY_PATH;
+
+    if (!fs.existsSync(targetPath)) {
+      res.status(404).json({
+        error: `De servermap "${targetPath}" bestaat niet of is nog niet gemount in de Docker container.`,
+      });
+      return;
+    }
+
+    const scannedTracks = await scanMountedMusicDirectory(targetPath);
+    res.json({
+      path: targetPath,
+      count: scannedTracks.length,
+      tracks: scannedTracks,
+    });
+  });
 
   // --- 1. Spotify OAuth Configuration & Status ---
-  app.get('/api/auth/spotify/status', (req: Request, res: Response) => {
+  app.get('/api/auth/spotify/status', requireAppAuth, (req: Request, res: Response) => {
     const session = getSessionFromReq(req);
     const hasCredentials = Boolean(
       process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET
@@ -592,7 +1100,7 @@ async function startServer() {
   });
 
   // --- 2. Construct Spotify OAuth URL for Popup ---
-  app.get('/api/auth/spotify/url', (req: Request, res: Response) => {
+  app.get('/api/auth/spotify/url', requireAppAuth, (req: Request, res: Response) => {
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const redirectUri = getRedirectUri(req);
 
@@ -760,7 +1268,7 @@ async function startServer() {
 
   app.get(['/auth/callback', '/auth/callback/'], callbackHandler);
 
-  app.post('/api/auth/spotify/logout', (req: Request, res: Response) => {
+  app.post('/api/auth/spotify/logout', requireAppAuth, (req: Request, res: Response) => {
     const session = getSessionFromReq(req);
     if (session) {
       sessions.delete(session.id);
@@ -774,7 +1282,7 @@ async function startServer() {
   });
 
   // --- 4. Batch Match Local Files Against Spotify Catalog ---
-  app.post('/api/spotify/match-batch', async (req: Request, res: Response) => {
+  app.post('/api/spotify/match-batch', requireAppAuth, async (req: Request, res: Response) => {
     const tracks = (req.body?.tracks || []) as LocalTrackInput[];
     const spotifyToken = await getSpotifyAccessToken(req);
 
@@ -790,7 +1298,7 @@ async function startServer() {
   });
 
   // --- 5. Manual Spotify Track Search ---
-  app.get('/api/spotify/search', async (req: Request, res: Response) => {
+  app.get('/api/spotify/search', requireAppAuth, async (req: Request, res: Response) => {
     const q = String(req.query.q || '').trim();
     if (!q) {
       res.json({ candidates: [] });
@@ -812,7 +1320,7 @@ async function startServer() {
   });
 
   // --- 6. Fetch User's Existing Spotify Playlists ---
-  app.get('/api/spotify/playlists', async (req: Request, res: Response) => {
+  app.get('/api/spotify/playlists', requireAppAuth, async (req: Request, res: Response) => {
     const session = getSessionFromReq(req);
     if (!session) {
       res.json({ connected: false, playlists: [] });
@@ -848,7 +1356,7 @@ async function startServer() {
   });
 
   // --- 7. Execute Differential Playlist Synchronization ---
-  app.post('/api/spotify/sync', async (req: Request, res: Response) => {
+  app.post('/api/spotify/sync', requireAppAuth, async (req: Request, res: Response) => {
     const { playlists } = req.body as {
       playlists: Array<{
         id: string;
@@ -863,7 +1371,6 @@ async function startServer() {
     const session = getSessionFromReq(req);
     const token = await getSpotifyAccessToken(req);
 
-    // If user is authenticated via OAuth with playlist-modify scopes, execute live against Spotify Web API
     if (session && token) {
       const syncResults = [];
 
@@ -874,7 +1381,6 @@ async function startServer() {
           let existingUris = new Set<string>();
 
           if (targetPlaylistId) {
-            // Fetch existing tracks to prevent duplicates
             const tracksResp = await fetch(
               `https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks?fields=items(track(uri))&limit=100`,
               { headers: { Authorization: `Bearer ${token}` } }
@@ -887,7 +1393,6 @@ async function startServer() {
             }
             externalUrl = `https://open.spotify.com/playlist/${targetPlaylistId}`;
           } else {
-            // Create new playlist in user's Spotify account
             const createResp = await fetch(
               `https://api.spotify.com/v1/users/${encodeURIComponent(session.user.id)}/playlists`,
               {
@@ -962,7 +1467,6 @@ async function startServer() {
       return;
     }
 
-    // Staged / Simulated Sync when OAuth is not yet connected
     const stagedResults = (playlists || []).map((pl) => {
       const generatedId = crypto
         .createHash('md5')
