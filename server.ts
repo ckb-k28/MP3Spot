@@ -53,10 +53,20 @@ const sessions = new Map<string, SpotifySession>();
 let clientCredentialsToken: { token: string; expiresAt: number } | null = null;
 
 // ============================================================================
-// Volume Paths Configuration (/music, /app/data, /exports)
+// Volume Paths Configuration (/music, /data, /exports)
 // ============================================================================
 const MUSIC_LIBRARY_PATH = process.env.MUSIC_LIBRARY_PATH || '/music';
-const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), 'data');
+
+function resolveDataPath(): string {
+  if (process.env.DATA_PATH && process.env.DATA_PATH.trim().length > 0) {
+    return process.env.DATA_PATH.trim();
+  }
+  if (fs.existsSync('/data')) return '/data';
+  if (fs.existsSync('/app/data')) return '/app/data';
+  return path.join(process.cwd(), 'data');
+}
+
+const DATA_PATH = resolveDataPath();
 const EXPORTS_PATH = process.env.EXPORTS_PATH || path.join(process.cwd(), 'exports');
 
 for (const dir of [DATA_PATH, EXPORTS_PATH]) {

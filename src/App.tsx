@@ -1404,7 +1404,7 @@ services:
       - PORT=3000
       - GIT_REPO_URL=${cleanRepo}
       - MUSIC_LIBRARY_PATH=/music
-      - DATA_PATH=/app/data
+      - DATA_PATH=/data
       - EXPORTS_PATH=/exports
       - SPOTIFY_CLIENT_ID=\${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
@@ -1412,19 +1412,27 @@ services:
     volumes:
       # 1. Lokale muziekmap op de host/NAS (:rw voor Spotify ID3v2.3 tagging)
       - ${musicMount}:/music:rw
-      # 2. Persistente database & app-status
-      - ${dataMount}:/app/data
+      # 2. Persistente database & app-status (buiten /app)
+      - ${dataMount}:/data
       # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
       - ${exportsMount}:/exports
-      # 4. Volume voor automatische GitHub clone
+      # 4. Volume voor MP3Spot applicatiecode
       - mp3spot_repo:/app
     command: >
       sh -c "apk add --no-cache git &&
+      git config --global --add safe.directory /app &&
       if [ ! -d /app/.git ]; then
-        git clone $$GIT_REPO_URL /app;
+        echo 'Cloning MP3Spot repository from GitHub...' &&
+        rm -rf /tmp/mp3spot_clone &&
+        mkdir -p /tmp/mp3spot_clone &&
+        git clone $$GIT_REPO_URL /tmp/mp3spot_clone &&
+        cp -a /tmp/mp3spot_clone/. /app/ &&
+        rm -rf /tmp/mp3spot_clone;
       else
-        git pull;
+        echo 'Updating MP3Spot repository...' &&
+        cd /app && git pull;
       fi &&
+      cd /app &&
       npm install &&
       npm run build &&
       npm run start"
@@ -1450,7 +1458,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - MUSIC_LIBRARY_PATH=/music
-      - DATA_PATH=/app/data
+      - DATA_PATH=/data
       - EXPORTS_PATH=/exports
       - SPOTIFY_CLIENT_ID=\${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=\${SPOTIFY_CLIENT_SECRET:-}
@@ -1458,8 +1466,8 @@ services:
     volumes:
       # 1. Lokale muziekmap op de host/NAS (:rw voor Spotify ID3v2.3 tagging)
       - ${musicMount}:/music:rw
-      # 2. Persistente database & app-status
-      - ${dataMount}:/app/data
+      # 2. Persistente database & app-status (buiten /app)
+      - ${dataMount}:/data
       # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
       - ${exportsMount}:/exports
 ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
@@ -1490,7 +1498,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   Huidige Build: <span className="font-mono font-semibold text-[#FF8F00]">v{buildInfo.version}</span>{' '}
                   (dag-build# <span className="font-mono">{buildInfo.buildNumber}</span>) · Volumes:{' '}
                   <span className="font-mono text-[#00B4D8]">/music:rw</span>,{' '}
-                  <span className="font-mono text-[#00B4D8]">/app/data</span>,{' '}
+                  <span className="font-mono text-[#00B4D8]">/data</span>,{' '}
                   <span className="font-mono text-[#00B4D8]">/exports</span>
                 </p>
               </div>
@@ -1597,7 +1605,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </div>
             <div>
               <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                Volume 2: App Data (`:/app/data`)
+                Volume 2: App Data (`:/data`)
               </label>
               <input
                 type="text"

@@ -20,18 +20,18 @@ COPY . .
 RUN npm run build
 
 # Maak standaard mappen aan voor gemounte volumes:
-# /music    -> Lokale muziekcollectie (read/write voor het terugschrijven van Spotify ID3-tags)
-# /app/data -> Persistente database/status opslag (tracks, afspeellijstregels, sync-historie)
-# /exports  -> Automatisch geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
-RUN mkdir -p /music /app/data /exports
+# /music   -> Lokale muziekcollectie (read/write voor het terugschrijven van Spotify ID3-tags)
+# /data    -> Persistente database/status opslag (tracks, afspeellijstregels, sync-historie)
+# /exports -> Automatisch geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
+RUN mkdir -p /music /data /app/data /exports
 
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV MUSIC_LIBRARY_PATH=/music
-ENV DATA_PATH=/app/data
+ENV DATA_PATH=/data
 ENV EXPORTS_PATH=/exports
 
-VOLUME ["/music", "/app/data", "/exports"]
+VOLUME ["/music", "/data", "/exports"]
 
 EXPOSE 3000
 

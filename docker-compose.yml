@@ -1,40 +1,75 @@
 # ==============================================================================
 # MP3Spot — Dockhand / Docker Compose Stack (Zero-Copy vanaf GitHub)
 #
-# Plak deze YAML direct in een nieuwe Dockhand Stack. Docker bouwt of kloont
-# automatisch rechtstreeks vanuit je GitHub-repository zonder dat je handmatig
-# bestanden naar de server hoeft te kopiëren.
+# Plak deze YAML direct in een nieuwe Dockhand / Portainer Stack.
+# De container installeert Git, haalt de nieuwste broncode direct op vanaf GitHub,
+# bouwt de frontend en start de server zonder dat je handmatig bestanden hoeft te kopiëren.
 # ==============================================================================
 
 services:
   mp3spot:
-    # Bouwt rechtstreeks vanaf GitHub zonder lokale bestanden op de host nodig te hebben.
-    # Vervang deze URL door jouw eigen GitHub repository URL:
-    build:
-      context: ${GIT_REPO_URL:-https://github.com/jouw-gebruikersnaam/mp3spot.git#main}
-      dockerfile: Dockerfile
+    # OPTIE A (Standaard Zero-Copy): Start een Node 22 Alpine container en kloont
+    # automatisch je GitHub repository naar het volume mp3spot_repo:/app.
+    image: node:22-alpine
     container_name: mp3spot
     restart: unless-stopped
+    working_dir: /app
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # --- Spotify Developer API Gegevens (optioneel in te vullen) ---
+      # Vervang door jouw eigen GitHub repository URL:
+      - GIT_REPO_URL=${GIT_REPO_URL:-https://github.com/jouw-gebruikersnaam/mp3spot.git}
+      # --- Spotify Developer API Gegevens (optioneel) ---
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
       - APP_URL=${APP_URL:-http://localhost:3000}
-      # --- Container Volume Paden ---
+      # --- Geïsoleerde Container Volume Paden ---
       - MUSIC_LIBRARY_PATH=/music
-      - DATA_PATH=/app/data
+      - DATA_PATH=/data
       - EXPORTS_PATH=/exports
     volumes:
-      # 1. Muziekbibliotheek: Koppel je lokale muziekmap op je server/NAS (read-write zodat MP3Spot ID3-tags uit Spotify kan bijschrijven)
+      # 1. Lokale muziekmap: Koppel je muziekmap (:rw zodat MP3Spot Spotify ID3-tags kan bijschrijven)
       - ${HOST_MUSIC_PATH:-/mnt/nas/muziek}:/music:rw
-      # 2. Persistente App Data: Bewaart je gescande bibliotheek, slimme regels en sync-historie
-      - ${HOST_DATA_PATH:-mp3spot_data}:/app/data
-      # 3. Afspeellijst Exports: Schrijft .m3u8, .json en .csv bestanden direct naar je server/NAS
+      # 2. Persistente App Data: Bewaart database, match-historie en playlistregels (buiten /app)
+      - ${HOST_DATA_PATH:-mp3spot_data}:/data
+      # 3. Afspeellijst Exports: Schrijft .m3u8, .json en .csv bestanden direct naar je host/NAS
       - ${HOST_EXPORTS_PATH:-./exports}:/exports
+      # 4. Applicatiecode volume: Behoudt de gekloonde code tussen container-herstarts
+      - mp3spot_repo:/app
+    # Veilige clone-and-sync sequence:
+    # Voorkomt de 'fatal: destination path /app already exists and is not an empty directory' fout
+    # door eerst naar een tijdelijke map te klonen en de inhoud veilig naar /app te kopiëren.
+    command: >
+      sh -c "apk add --no-cache git &&
+      git config --global --add safe.directory /app &&
+      if [ ! -d /app/.git ]; then
+        echo 'Cloning MP3Spot repository from GitHub...' &&
+        rm -rf /tmp/mp3spot_clone &&
+        mkdir -p /tmp/mp3spot_clone &&
+        git clone $$GIT_REPO_URL /tmp/mp3spot_clone &&
+        cp -a /tmp/mp3spot_clone/. /app/ &&
+        rm -rf /tmp/mp3spot_clone;
+      else
+        echo 'Updating MP3Spot repository via git pull...' &&
+        cd /app && git pull;
+      fi &&
+      cd /app &&
+      npm install &&
+      npm run build &&
+      npm run start"
 
 volumes:
+  mp3spot_repo:
   mp3spot_data:
+
+# ------------------------------------------------------------------------------
+# ALTERNATIEF: OPTIE B (Native Docker Git Build)
+# Als jouw Docker daemon 'build from git URL' ondersteunt, kun je in plaats van
+# 'image: node:22-alpine' en het 'command: ...' blok bovenin, dit build-blok gebruiken:
+#
+#   build:
+#     context: https://github.com/jouw-gebruikersnaam/mp3spot.git#main
+#     dockerfile: Dockerfile
+# ------------------------------------------------------------------------------
