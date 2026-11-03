@@ -125,8 +125,12 @@ services:
         cp -a /tmp/mp3spot_clone/. /app/ &&
         rm -rf /tmp/mp3spot_clone;
       else
-        echo 'Updating MP3Spot repository via git pull...' &&
-        cd /app && git pull;
+        echo 'Updating MP3Spot repository from GitHub...' &&
+        cd /app &&
+        git remote set-url origin $$GIT_REPO_URL &&
+        git fetch origin &&
+        git reset --hard origin/HEAD &&
+        git clean -fd;
       fi &&
       cd /app &&
       npm install --include=dev --legacy-peer-deps &&
