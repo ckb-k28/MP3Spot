@@ -1,0 +1,6 @@
+{
+  "name": "SpotiSync Studio",
+  "description": "Synchroniseer je lokale muziekbibliotheek en metadata efficiënt met Spotify en genereer automatisch slimme afspeellijsten.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
