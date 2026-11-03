@@ -20,6 +20,11 @@ import {
   HardDrive,
   Tag,
   Calendar,
+  Sliders,
+  SlidersHorizontal,
+  Sparkles,
+  ListMusic,
+  Layers,
 } from 'lucide-react';
 import {
   AutoPlaylistRule,
@@ -40,8 +45,9 @@ import {
 } from './utils/audioMetadataParser';
 import initialVersionData from './version.json';
 import { MP3SpotLogo, MP3SpotIcon } from './components/MP3SpotLogo';
+import { InlineConfigPanel } from './components/InlineConfigPanel';
 
-type ActiveTab = 'library' | 'matcher' | 'playlists' | 'sync';
+type ActiveTab = 'library' | 'matcher' | 'playlists' | 'sync' | 'config';
 
 interface BuildVersionInfo {
   date: string;
@@ -129,6 +135,11 @@ export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<ActiveTab>('library');
 
+  const handleSwitchTab = (tab: ActiveTab) => {
+    setActiveTab(tab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // --- Build Version State (year.month.day[.build#], first build of day = 0) ---
   const [buildInfo, setBuildInfo] = useState<BuildVersionInfo>(() => ({
     date: initialVersionData.date || '2026.11.03',
@@ -193,6 +204,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | MatchStatus>('ALL');
   const [formatFilter, setFormatFilter] = useState<string>('ALL');
+  const [matcherFilter, setMatcherFilter] = useState<'ALL' | 'review' | 'matched' | 'unmatched' | 'tagged'>('ALL');
+  const [showInlineConfigBanner, setShowInlineConfigBanner] = useState<boolean>(false);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string>(
     INITIAL_PLAYLIST_RULES[0]?.id || ''
   );
@@ -858,6 +871,25 @@ export default function App() {
       return true;
     });
   }, [tracks, selectedFolder, statusFilter, formatFilter, searchQuery]);
+
+  // Filtered tracks specifically for Spotify Matcher view
+  const matcherFilteredTracks = useMemo(() => {
+    return tracks.filter((t) => {
+      if (selectedFolder !== 'ALL' && t.folderPath !== selectedFolder) return false;
+      if (matcherFilter === 'review' && t.matchStatus !== 'review') return false;
+      if (matcherFilter === 'matched' && t.matchStatus !== 'matched' && t.matchStatus !== 'synced') return false;
+      if (matcherFilter === 'unmatched' && t.matchStatus !== 'unmatched') return false;
+      if (matcherFilter === 'tagged' && !t.id3TaggedFromSpotify) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const hay = `${t.title} ${t.artist} ${t.album} ${t.genre} ${t.fileName} ${t.year} ${
+          t.isrc || ''
+        }`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [tracks, selectedFolder, matcherFilter, searchQuery]);
 
   // Library Summary Metrics
   const metrics = useMemo(() => {
@@ -1687,9 +1719,9 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
         className="hidden"
       />
 
-      {/* Top Bar Contract: Strictly 3 zones separated by gap-8 */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-200 dark:border-[#3A3D40] bg-white dark:bg-[#1F2225] sticky top-0 z-30">
-        {/* Zone 1: Single brand anchor with icon and wordmark */}
+      {/* Top Bar Navigation: Brand + Polished Responsive Segmented Tabs + Quick Actions */}
+      <header className="flex items-center justify-between gap-4 px-4 sm:px-6 py-3 border-b border-slate-200 dark:border-[#3A3D40] bg-white/95 dark:bg-[#1E2124]/95 backdrop-blur-md sticky top-0 z-30 shadow-xs">
+        {/* Zone 1: Brand anchor with icon, wordmark & version tag */}
         <a
           href="#bibliotheek"
           onClick={(e) => {
@@ -1698,62 +1730,175 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           }}
           className="flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 font-display hover:opacity-90 transition-opacity"
         >
-          <MP3SpotIcon size={28} />
-          <span>
-            MP3<span className="text-[#FF8F00]">Spot</span>
-          </span>
+          <MP3SpotIcon size={30} />
+          <div className="flex flex-col">
+            <span className="leading-tight">
+              MP3<span className="text-[#FF8F00]">Spot</span>
+            </span>
+            <span className="text-[10px] font-mono text-slate-400 font-normal leading-none">
+              v{buildInfo.version}
+            </span>
+          </div>
         </a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-300">
+        {/* Zone 2: Polished 5-Tab Segmented Control (Always visible & responsive) */}
+        <nav
+          className="flex items-center gap-1.5 p-1 bg-slate-100 dark:bg-[#151719] border border-slate-200 dark:border-[#3A3D40] rounded-xl overflow-x-auto no-scrollbar max-w-full"
+          role="tablist"
+          aria-label="MP3Spot Hoofdnavigatie"
+        >
           <button
             type="button"
-            onClick={() => setActiveTab('library')}
-            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            role="tab"
+            aria-selected={activeTab === 'library'}
+            onClick={() => handleSwitchTab('library')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'library'
-                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
-                : 'border-transparent'
+                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
             }`}
           >
-            Bibliotheek
+            <FolderOpen className={`w-3.5 h-3.5 ${activeTab === 'library' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
+            <span>Bibliotheek</span>
+            <span
+              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeTab === 'library'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-slate-200 dark:bg-[#2A2D30] text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              {metrics.total}
+            </span>
           </button>
+
           <button
             type="button"
-            onClick={() => setActiveTab('matcher')}
-            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            role="tab"
+            aria-selected={activeTab === 'matcher'}
+            onClick={() => handleSwitchTab('matcher')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'matcher'
-                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
-                : 'border-transparent'
+                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
             }`}
           >
-            Spotify Matcher
+            <Sparkles className={`w-3.5 h-3.5 ${activeTab === 'matcher' ? 'text-slate-950' : 'text-[#00B4D8]'}`} />
+            <span>Spotify Matcher</span>
+            <span
+              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeTab === 'matcher'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-[#FF8F00]/20 text-[#FF8F00]'
+              }`}
+            >
+              {metrics.matchRatePct}%
+            </span>
           </button>
+
           <button
             type="button"
-            onClick={() => setActiveTab('playlists')}
-            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            role="tab"
+            aria-selected={activeTab === 'playlists'}
+            onClick={() => handleSwitchTab('playlists')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'playlists'
-                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
-                : 'border-transparent'
+                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
             }`}
           >
-            Slimme Lijsten
+            <Calendar className={`w-3.5 h-3.5 ${activeTab === 'playlists' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
+            <span>Slimme Lijsten</span>
+            <span
+              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeTab === 'playlists'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-slate-200 dark:bg-[#2A2D30] text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              {evaluatedPlaylists.length}
+            </span>
           </button>
+
           <button
             type="button"
-            onClick={() => setActiveTab('sync')}
-            className={`hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap shrink-0 pb-0.5 border-b-2 ${
+            role="tab"
+            aria-selected={activeTab === 'sync'}
+            onClick={() => handleSwitchTab('sync')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'sync'
-                ? 'text-slate-900 dark:text-white border-[#FF8F00]'
-                : 'border-transparent'
+                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
             }`}
           >
-            Synchronisatie
+            <RefreshCw className={`w-3.5 h-3.5 ${activeTab === 'sync' ? 'text-slate-950 animate-spin' : 'text-[#00B4D8]'}`} />
+            <span>Synchronisatie</span>
+            {totalPendingSyncTracks > 0 && (
+              <span
+                className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
+                  activeTab === 'sync'
+                    ? 'bg-slate-950/20 text-slate-950 font-bold'
+                    : 'bg-[#00B4D8]/20 text-[#00B4D8] font-bold'
+                }`}
+              >
+                +{totalPendingSyncTracks}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'config'}
+            onClick={() => handleSwitchTab('config')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              activeTab === 'config'
+                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
+            }`}
+          >
+            <Sliders className={`w-3.5 h-3.5 ${activeTab === 'config' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
+            <span>Configuratie</span>
+            <span
+              className={`font-mono text-[9px] px-1 py-0.2 rounded ${
+                activeTab === 'config'
+                  ? 'bg-slate-950/20 text-slate-950 font-bold'
+                  : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold'
+              }`}
+            >
+              Inline
+            </span>
           </button>
         </nav>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Zone 3: Quick Action Controls */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Quick Toggle for Inline Config Banner (Accessible from any tab) */}
+          <button
+            type="button"
+            onClick={() => setShowInlineConfigBanner((prev) => !prev)}
+            title="Snelle Inline Configuratie uitklappen"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+              showInlineConfigBanner
+                ? 'border-[#FF8F00] bg-[#FF8F00]/15 text-[#FF8F00] font-semibold'
+                : 'border-slate-200 dark:border-[#3A3D40] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2A2D30]'
+            }`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-[#FF8F00]" />
+            <span className="hidden sm:inline">Inline Config</span>
+          </button>
+
+          {/* Theme switcher */}
+          <button
+            type="button"
+            onClick={() => setDarkMode((d) => !d)}
+            className="p-1.5 rounded-lg border border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2A2D30] transition-colors"
+            title={darkMode ? 'Licht thema' : 'Donker thema'}
+            aria-label="Thema wisselen"
+          >
+            {darkMode ? <Sun className="w-4 h-4 text-[#FF8F00]" /> : <Moon className="w-4 h-4 text-slate-600" />}
+          </button>
+
+          {/* Primary Action Button */}
           {spotifyAuth.connected ? (
             <button
               type="button"
@@ -1762,17 +1907,15 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 handleRunDifferentialSync();
               }}
               disabled={isSyncing}
-              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-xl hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-md cursor-pointer"
+              className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-lg hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer disabled:opacity-50"
             >
-              {isSyncing
-                ? 'Synchroniseren...'
-                : `Synchroniseer Nu (${totalPendingSyncTracks})`}
+              {isSyncing ? 'Synchroniseren...' : `Sync Nu (${totalPendingSyncTracks})`}
             </button>
           ) : (
             <button
               type="button"
               onClick={handleConnectSpotify}
-              className="px-4 py-2 text-xs font-semibold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-xl hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-md cursor-pointer"
+              className="px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-gradient-to-r from-[#D84315] to-[#FF8F00] rounded-lg hover:brightness-110 transition-all whitespace-nowrap shadow-sm cursor-pointer"
             >
               Verbind Spotify
             </button>
@@ -1785,29 +1928,96 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
         {/* Left Navigation & Folder Tree Sidebar */}
         <aside className="w-full lg:w-64 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-5 flex flex-col justify-between gap-6">
           <div className="space-y-6">
-            {/* Mobile Navigation Switcher */}
-            <div className="flex md:hidden items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg overflow-x-auto">
-              {(
-                [
-                  ['library', 'Bibliotheek'],
-                  ['matcher', 'Matcher'],
-                  ['playlists', 'Lijsten'],
-                  ['sync', 'Sync'],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setActiveTab(key)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                    activeTab === key
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+            {/* Hoofdnavigatie Menu (All screen sizes: Desktop & Mobile) */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-500 dark:text-slate-400">
+                <span>Hoofdnavigatie</span>
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-200 dark:bg-[#25282C]">
+                  5 Tabs
+                </span>
+              </div>
+              <div className="space-y-1">
+                {[
+                  {
+                    id: 'library' as const,
+                    label: 'Bibliotheek',
+                    desc: 'Lokale Audio & ID3',
+                    icon: FolderOpen,
+                    badge: `${metrics.total}`,
+                    color: 'text-[#FF8F00]',
+                  },
+                  {
+                    id: 'matcher' as const,
+                    label: 'Spotify Matcher',
+                    desc: 'Metadata & Tagging',
+                    icon: Sparkles,
+                    badge: `${metrics.matchRatePct}%`,
+                    color: 'text-[#00B4D8]',
+                  },
+                  {
+                    id: 'playlists' as const,
+                    label: 'Slimme Lijsten',
+                    desc: 'Jaar- & Filterregels',
+                    icon: Calendar,
+                    badge: `${evaluatedPlaylists.length}`,
+                    color: 'text-[#FF8F00]',
+                  },
+                  {
+                    id: 'sync' as const,
+                    label: 'Synchronisatie',
+                    desc: 'Spotify & Exports',
+                    icon: RefreshCw,
+                    badge: totalPendingSyncTracks > 0 ? `+${totalPendingSyncTracks}` : 'Actief',
+                    color: 'text-[#00B4D8]',
+                  },
+                  {
+                    id: 'config' as const,
+                    label: 'Inline Config',
+                    desc: 'Dockhand & Volumes',
+                    icon: Sliders,
+                    badge: `v${buildInfo.version}`,
+                    color: 'text-[#FF8F00]',
+                  },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => handleSwitchTab(item.id)}
+                      className={`w-full flex items-center justify-between p-2.5 rounded-lg text-xs transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-sm ring-1 ring-[#FF8F00]/50'
+                          : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#25282C]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-slate-950' : item.color}`} />
+                        <div className="text-left truncate">
+                          <div className="font-semibold leading-tight truncate">{item.label}</div>
+                          <div
+                            className={`text-[10px] leading-tight truncate ${
+                              isActive ? 'text-slate-950/80 font-normal' : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                          >
+                            {item.desc}
+                          </div>
+                        </div>
+                      </div>
+                      <span
+                        className={`font-mono tabular-nums text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ml-1.5 ${
+                          isActive
+                            ? 'bg-slate-950/25 text-slate-950 font-extrabold'
+                            : 'bg-slate-200 dark:bg-[#2A2D30] text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        {item.badge}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Quick Upload & Docker Server Volume Actions */}
@@ -1872,8 +2082,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 type="button"
                 onClick={() => {
                   setSelectedFolder('ALL');
-                  if (activeTab === 'playlists' || activeTab === 'sync') {
-                    setActiveTab('library');
+                  if (activeTab === 'playlists' || activeTab === 'sync' || activeTab === 'config') {
+                    handleSwitchTab('library');
                   }
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
@@ -1897,8 +2107,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     title={folderPath}
                     onClick={() => {
                       setSelectedFolder(folderPath);
-                      if (activeTab === 'playlists' || activeTab === 'sync') {
-                        setActiveTab('library');
+                      if (activeTab === 'playlists' || activeTab === 'sync' || activeTab === 'config') {
+                        handleSwitchTab('library');
                       }
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
@@ -1931,7 +2141,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     type="button"
                     onClick={() => {
                       setSelectedPlaylistId(ep.rule.id);
-                      setActiveTab('playlists');
+                      handleSwitchTab('playlists');
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 text-xs rounded-md transition-colors ${
                       isSelected
@@ -2074,67 +2284,244 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             </div>
           )}
 
-          {/* KPI Metric Strip — Single-elevation hairline grid with tabular numerals */}
-          <section className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-[#3A3D40]">
-            <div className="p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Lokale Muziekbestanden
+          {/* Optional Collapsible Inline Config Drawer (Accessible from any tab via top button) */}
+          {showInlineConfigBanner && activeTab !== 'config' && (
+            <div className="mb-6">
+              <InlineConfigPanel
+                buildInfo={buildInfo}
+                onBumpBuild={handleBumpBuildVersion}
+                appAuthStatus={appAuthStatus}
+                spotifyAuth={spotifyAuth}
+                onConnectSpotify={handleConnectSpotify}
+                onDisconnectSpotify={handleDisconnectSpotify}
+                onRefreshSpotifyStatus={fetchSpotifyStatus}
+                stackGitRepoUrl={stackGitRepoUrl}
+                setStackGitRepoUrl={setStackGitRepoUrl}
+                stackMusicPath={stackMusicPath}
+                setStackMusicPath={setStackMusicPath}
+                stackDataPath={stackDataPath}
+                setStackDataPath={setStackDataPath}
+                stackExportsPath={stackExportsPath}
+                setStackExportsPath={setStackExportsPath}
+                stackPort={stackPort}
+                setStackPort={setStackPort}
+                dockhandMode={dockhandMode}
+                setDockhandMode={setDockhandMode}
+                generatedDockhandYaml={generatedDockhandYaml}
+                copyToClipboard={copyToClipboard}
+                copiedUrlKey={copiedUrlKey}
+                isCollapsible
+                isExpanded={showInlineConfigBanner}
+                onToggleExpand={() => setShowInlineConfigBanner(false)}
+                onClose={() => setShowInlineConfigBanner(false)}
+              />
+            </div>
+          )}
+
+          {/* KPI Metric Strip — Interactive: clicking a box switches directly to that view */}
+          {activeTab !== 'config' && (
+            <section className="grid grid-cols-2 lg:grid-cols-4 border border-slate-200 dark:border-[#3A3D40] rounded-xl bg-white dark:bg-[#1E2124] divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-[#3A3D40] overflow-hidden shadow-xs">
+              <button
+                type="button"
+                onClick={() => handleSwitchTab('library')}
+                className={`p-4 text-left transition-all cursor-pointer ${
+                  activeTab === 'library'
+                    ? 'bg-gradient-to-br from-[#D84315]/10 to-[#FF8F00]/15 ring-2 ring-inset ring-[#FF8F00]'
+                    : 'hover:bg-slate-50 dark:hover:bg-[#25282C]'
+                }`}
+              >
+                <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                  <span>Lokale Muziekbestanden</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${activeTab === 'library' ? 'bg-[#FF8F00] text-slate-950 font-bold' : 'opacity-0'}`}>
+                    Actief
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                    {metrics.total}
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    {metrics.totalSizeMB} MB
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSwitchTab('matcher')}
+                className={`p-4 text-left transition-all cursor-pointer ${
+                  activeTab === 'matcher'
+                    ? 'bg-gradient-to-br from-[#D84315]/10 to-[#FF8F00]/15 ring-2 ring-inset ring-[#FF8F00]'
+                    : 'hover:bg-slate-50 dark:hover:bg-[#25282C]'
+                }`}
+              >
+                <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                  <span>Spotify Match & ID3 Getagd</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${activeTab === 'matcher' ? 'bg-[#FF8F00] text-slate-950 font-bold' : 'opacity-0'}`}>
+                    Actief
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono tabular-nums text-[#FF8F00]">
+                    {metrics.matchRatePct}%
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    {metrics.id3TaggedCount} ID3v2.3
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSwitchTab('playlists')}
+                className={`p-4 text-left transition-all cursor-pointer ${
+                  activeTab === 'playlists'
+                    ? 'bg-gradient-to-br from-[#D84315]/10 to-[#FF8F00]/15 ring-2 ring-inset ring-[#FF8F00]'
+                    : 'hover:bg-slate-50 dark:hover:bg-[#25282C]'
+                }`}
+              >
+                <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                  <span>Automatische Jaar-Lijsten</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${activeTab === 'playlists' ? 'bg-[#FF8F00] text-slate-950 font-bold' : 'opacity-0'}`}>
+                    Actief
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                    {yearStats.length}
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    jaren in Spotify
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSwitchTab('sync')}
+                className={`p-4 text-left transition-all cursor-pointer ${
+                  activeTab === 'sync'
+                    ? 'bg-gradient-to-br from-[#D84315]/10 to-[#FF8F00]/15 ring-2 ring-inset ring-[#FF8F00]'
+                    : 'hover:bg-slate-50 dark:hover:bg-[#25282C]'
+                }`}
+              >
+                <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                  <span>Klaar voor Synchronisatie</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${activeTab === 'sync' ? 'bg-[#FF8F00] text-slate-950 font-bold' : 'opacity-0'}`}>
+                    Actief
+                  </span>
+                </div>
+                <div className="mt-1 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono tabular-nums text-[#00B4D8]">
+                    {totalPendingSyncTracks}
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    in {evaluatedPlaylists.length} lijsten
+                  </span>
+                </div>
+              </button>
+            </section>
+          )}
+
+          {/* Active Module Header Strip — Clear Breadcrumb & View Status for Immediate Visual Feedback */}
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-50 dark:bg-[#181A1D] border border-slate-200 dark:border-[#3A3D40] shadow-xs">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-gradient-to-br from-[#D84315] to-[#FF8F00] text-slate-950 shrink-0 shadow-sm">
+                {activeTab === 'library' && <FolderOpen className="w-4 h-4" />}
+                {activeTab === 'matcher' && <Sparkles className="w-4 h-4" />}
+                {activeTab === 'playlists' && <Calendar className="w-4 h-4" />}
+                {activeTab === 'sync' && <RefreshCw className="w-4 h-4" />}
+                {activeTab === 'config' && <Sliders className="w-4 h-4" />}
               </div>
-              <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                  {metrics.total}
-                </span>
-                <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  {metrics.totalSizeMB} MB
-                </span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-[#FF8F00] font-bold">
+                    Actieve Tab
+                  </span>
+                  <span className="text-slate-400">/</span>
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    {activeTab === 'library' && '1. Lokale Bibliotheek & ID3 Bestandsbeheer'}
+                    {activeTab === 'matcher' && '2. Spotify Metadata Matcher & ID3v2.3 Tagger'}
+                    {activeTab === 'playlists' && '3. Automatische Jaar-Lijsten & Slimme Regels'}
+                    {activeTab === 'sync' && '4. Differentiële Synchronisatie & Volume Export'}
+                    {activeTab === 'config' && '5. Inline Configuratie & Dockhand Stack'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {activeTab === 'library' && `${metrics.total} bestanden · ${metrics.totalSizeMB} MB · Volume: ${appAuthStatus.musicLibraryPath}`}
+                  {activeTab === 'matcher' && `${metrics.matchRatePct}% gematcht · ${metrics.id3TaggedCount} ID3v2.3 getagd · ${metrics.reviewCount} te beoordelen`}
+                  {activeTab === 'playlists' && `${evaluatedPlaylists.length} actieve lijsten (inclusief automatische releasejaren)`}
+                  {activeTab === 'sync' && `${totalPendingSyncTracks} tracks klaar voor live sync naar Spotify of /exports`}
+                  {activeTab === 'config' && `Build v${buildInfo.version} · 3 Volumes (/music:rw, /data, /exports)`}
+                </div>
               </div>
             </div>
-            <div className="p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Spotify Match & ID3 Getagd
-              </div>
-              <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-[#FF8F00]">
-                  {metrics.matchRatePct}%
-                </span>
-                <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  {metrics.id3TaggedCount} ID3v2.3 getagd
-                </span>
-              </div>
+
+            {/* Quick direct jumper tabs */}
+            <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-[#121416] p-1 rounded-lg text-[11px]">
+              {(
+                [
+                  ['library', 'Bibliotheek'],
+                  ['matcher', 'Matcher'],
+                  ['playlists', 'Lijsten'],
+                  ['sync', 'Sync'],
+                  ['config', 'Config'],
+                ] as const
+              ).map(([tabId, tabName]) => (
+                <button
+                  key={tabId}
+                  type="button"
+                  onClick={() => handleSwitchTab(tabId)}
+                  className={`px-2.5 py-1 rounded-md font-medium transition-all cursor-pointer ${
+                    activeTab === tabId
+                      ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  {tabName}
+                </button>
+              ))}
             </div>
-            <div className="p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Automatische Jaar-Lijsten
-              </div>
-              <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                  {yearStats.length}
-                </span>
-                <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  jaren in Spotify
-                </span>
-              </div>
-            </div>
-            <div className="p-4">
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Klaar voor Synchronisatie
-              </div>
-              <div className="mt-1 flex items-baseline justify-between">
-                <span className="text-2xl font-bold font-mono tabular-nums text-[#00B4D8]">
-                  {totalPendingSyncTracks}
-                </span>
-                <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                  in {evaluatedPlaylists.length} lijsten
-                </span>
-              </div>
-            </div>
-          </section>
+          </div>
 
           {/* ===================================================================
               VIEW 1: LOKALE BIBLIOTHEEK, SPOTIFY ID3 TAGGER & SCANNER
              =================================================================== */}
           {activeTab === 'library' && (
             <div className="space-y-6">
+              {/* Library View Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-5 h-5 text-[#FF8F00]" />
+                    <h1 className="text-base font-bold text-slate-900 dark:text-white">
+                      MP3Spot Lokale Bibliotheek & Bestandsbeheer
+                    </h1>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+                    Doorzoek en bewerk lokale metadata, inspecteer ID3v2.3 tags en beheer audiobestanden op de host of in het Docker /music volume.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => folderInputRef.current?.click()}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 dark:border-[#3A3D40] text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#25282C] transition-colors"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-[#FF8F00]" />
+                    <span>Scan Browser Map</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleScanServerVolume}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-[#00B4D8]/40 text-[#00B4D8] hover:bg-[#00B4D8]/10 transition-colors"
+                  >
+                    <HardDrive className="w-3.5 h-3.5" />
+                    <span>Scan /music Volume</span>
+                  </button>
+                </div>
+              </div>
+
               {/* Drag & Drop Local Music Folder Zone */}
               <div
                 onDragOver={(e) => e.preventDefault()}
@@ -2549,17 +2936,20 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
              =================================================================== */}
           {activeTab === 'matcher' && (
             <div className="space-y-6">
+              {/* Matcher View Header */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
-                  <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Spotify Metadata Matcher & ID3v2.3 Tagger
-                  </h1>
-                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                    Koppel lokale bestanden aan Spotify en schrijf direct de officiële Spotify ID3
-                    metadata (Titel, Artiest, Album, Releasejaar & ISRC) naar je lokale bestanden.
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-[#00B4D8]" />
+                    <h1 className="text-base font-bold text-slate-900 dark:text-white">
+                      Spotify Metadata Matcher & ID3v2.3 Tagger
+                    </h1>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+                    Verifieer matches in de Spotify catalogus en schrijf direct de officiële Spotify ID3 metadata (TIT2, TPE1, TALB, TYER, TSRC & Spotify URI) naar je lokale bestanden.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => handleWriteSpotifyId3Tags()}
@@ -2580,6 +2970,60 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     />
                     <span>Scan Alle Nummers Opnieuw</span>
                   </button>
+                </div>
+              </div>
+
+              {/* Matcher Filter Bar & Search */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 dark:bg-[#151719] border border-slate-200 dark:border-[#3A3D40]">
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="font-semibold text-slate-500 dark:text-slate-400 mr-1 text-[11px]">
+                    Filter Status:
+                  </span>
+                  {[
+                    { id: 'ALL', label: 'Alle Nummers', count: tracks.length },
+                    { id: 'review', label: 'Te Beoordelen', count: metrics.reviewCount, alert: metrics.reviewCount > 0 },
+                    { id: 'matched', label: 'Gematcht', count: metrics.exactOrSynced },
+                    { id: 'unmatched', label: 'Geen Match', count: metrics.unmatchedCount },
+                    { id: 'tagged', label: 'Spotify ID3 Getagd', count: metrics.id3TaggedCount },
+                  ].map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setMatcherFilter(f.id as any)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
+                        matcherFilter === f.id
+                          ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs border border-slate-300 dark:border-[#3A3D40] font-bold'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <span>{f.label}</span>
+                      <span className={`font-mono text-[10px] px-1.5 py-0.2 rounded-full ${
+                        f.alert
+                          ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400 font-bold'
+                          : matcherFilter === f.id
+                          ? 'bg-[#FF8F00]/20 text-[#FF8F00]'
+                          : 'bg-slate-200 dark:bg-slate-800'
+                      }`}>
+                        {f.count}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Zoek in matcher..."
+                      className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#1E2124] text-slate-900 dark:text-white focus:outline-none focus:border-[#FF8F00] w-48 sm:w-60"
+                    />
+                  </div>
+                  <div className="text-xs font-mono text-slate-500 hidden sm:block whitespace-nowrap">
+                    Score: <span className="font-bold text-[#FF8F00]">{metrics.matchRatePct}%</span>
+                  </div>
                 </div>
               </div>
 
@@ -2658,7 +3102,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               )}
 
               <div className="border border-slate-200 dark:border-[#3A3D40] rounded-lg bg-white dark:bg-[#1E2124] divide-y divide-slate-200 dark:divide-[#3A3D40]">
-                {tracks.map((trk) => {
+                {matcherFilteredTracks.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+                    Geen nummers gevonden voor het gekozen filter &quot;{matcherFilter}&quot;.
+                  </div>
+                ) : (
+                  matcherFilteredTracks.map((trk) => {
                   const durationDelta = trk.selectedMatch
                     ? Math.abs(trk.durationSec - trk.selectedMatch.durationSec)
                     : 0;
@@ -2776,7 +3225,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                       </div>
                     </div>
                   );
-                })}
+                }))}
               </div>
             </div>
           )}
@@ -2788,10 +3237,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
-                  <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Automatische Jaar-Afspeellijsten & Slimme Regels
-                  </h1>
-                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-5 h-5 text-[#FF8F00]" />
+                    <h1 className="text-base font-bold text-slate-900 dark:text-white">
+                      Automatische Jaar-Afspeellijsten & Slimme Regels
+                    </h1>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
                     Elk nummer dat op Spotify beschikbaar is, wordt automatisch in een{' '}
                     <span className="font-mono text-[#FF8F00]">MP3Spot Jaar: YYYY</span> afspeellijst geplaatst,
                     aangevuld met je eigen map-, genre- en BPM-regels.
@@ -3116,10 +3568,13 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-[#3A3D40] pb-4">
                 <div>
-                  <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    MP3Spot Differentiële Synchronisatie & Volume Export
-                  </h1>
-                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="w-5 h-5 text-[#00B4D8]" />
+                    <h1 className="text-base font-bold text-slate-900 dark:text-white">
+                      MP3Spot Differentiële Synchronisatie & Volume Export
+                    </h1>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
                     Synchroniseer je jaar-afspeellijsten en slimme lijsten naar Spotify of schrijf
                     `.m3u8` / `.json` / `.csv` rechtstreeks naar het gemounte Docker-volume (
                     <span className="font-mono text-[#00B4D8]">{appAuthStatus.exportsPath || '/exports'}</span>).
@@ -3278,6 +3733,39 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* ===================================================================
+              VIEW 5: INLINE CONFIGURATIE & DOCKHAND STACK (DE INLINE CONFIG!)
+             =================================================================== */}
+          {activeTab === 'config' && (
+            <div className="space-y-6">
+              <InlineConfigPanel
+                buildInfo={buildInfo}
+                onBumpBuild={handleBumpBuildVersion}
+                appAuthStatus={appAuthStatus}
+                spotifyAuth={spotifyAuth}
+                onConnectSpotify={handleConnectSpotify}
+                onDisconnectSpotify={handleDisconnectSpotify}
+                onRefreshSpotifyStatus={fetchSpotifyStatus}
+                stackGitRepoUrl={stackGitRepoUrl}
+                setStackGitRepoUrl={setStackGitRepoUrl}
+                stackMusicPath={stackMusicPath}
+                setStackMusicPath={setStackMusicPath}
+                stackDataPath={stackDataPath}
+                setStackDataPath={setStackDataPath}
+                stackExportsPath={stackExportsPath}
+                setStackExportsPath={setStackExportsPath}
+                stackPort={stackPort}
+                setStackPort={setStackPort}
+                dockhandMode={dockhandMode}
+                setDockhandMode={setDockhandMode}
+                generatedDockhandYaml={generatedDockhandYaml}
+                copyToClipboard={copyToClipboard}
+                copiedUrlKey={copiedUrlKey}
+                isCollapsible={false}
+              />
             </div>
           )}
         </main>

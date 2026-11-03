@@ -81,6 +81,22 @@ for (const dir of [DATA_PATH, EXPORTS_PATH]) {
 
 const STATE_FILE_PATH = path.join(DATA_PATH, 'mp3spot-state.json');
 const VERSION_FILE_PATH = path.join(process.cwd(), 'src', 'version.json');
+const SPOTIFY_CONFIG_FILE_PATH = path.join(DATA_PATH, 'mp3spot-spotify.json');
+
+try {
+  if (fs.existsSync(SPOTIFY_CONFIG_FILE_PATH)) {
+    const raw = fs.readFileSync(SPOTIFY_CONFIG_FILE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed.clientId && !process.env.SPOTIFY_CLIENT_ID) {
+      process.env.SPOTIFY_CLIENT_ID = parsed.clientId;
+    }
+    if (parsed.clientSecret && !process.env.SPOTIFY_CLIENT_SECRET) {
+      process.env.SPOTIFY_CLIENT_SECRET = parsed.clientSecret;
+    }
+  }
+} catch {
+  // Ignore
+}
 
 // ============================================================================
 // Build Versioning System: year.month.day.build#
@@ -1417,6 +1433,47 @@ async function startServer() {
       path: targetPath,
       count: scannedTracks.length,
       tracks: scannedTracks,
+    });
+  });
+
+  // --- 0. Spotify API Runtime Credentials Endpoints ---
+  app.get('/api/auth/spotify/credentials', (_req: Request, res: Response) => {
+    res.json({
+      clientId: process.env.SPOTIFY_CLIENT_ID || '',
+      hasSecret: Boolean(process.env.SPOTIFY_CLIENT_SECRET),
+    });
+  });
+
+  app.post('/api/auth/spotify/credentials', async (req: Request, res: Response) => {
+    const { clientId, clientSecret } = req.body as { clientId?: string; clientSecret?: string };
+    if (clientId !== undefined) {
+      process.env.SPOTIFY_CLIENT_ID = (clientId || '').trim();
+    }
+    if (clientSecret !== undefined && clientSecret.trim().length > 0) {
+      process.env.SPOTIFY_CLIENT_SECRET = (clientSecret || '').trim();
+    }
+    clientCredentialsToken = null;
+    try {
+      await fs.promises.mkdir(DATA_PATH, { recursive: true });
+      await fs.promises.writeFile(
+        SPOTIFY_CONFIG_FILE_PATH,
+        JSON.stringify(
+          {
+            clientId: process.env.SPOTIFY_CLIENT_ID || '',
+            clientSecret: process.env.SPOTIFY_CLIENT_SECRET || '',
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+    } catch {
+      // Ignore
+    }
+    res.json({
+      ok: true,
+      clientId: process.env.SPOTIFY_CLIENT_ID || '',
+      hasSecret: Boolean(process.env.SPOTIFY_CLIENT_SECRET),
     });
   });
 
