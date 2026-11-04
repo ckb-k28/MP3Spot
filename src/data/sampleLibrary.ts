@@ -690,9 +690,7 @@ export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
       exactYear: 2017,
       minConfidence: 68,
     },
-    spotifyPlaylistId: '37i9dQZF1DX4fpCWaHOned',
-    lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedTrackUris: ['spotify:track:0VjIjW4GlUZAMYd2vXMi3c'],
+    syncedTrackUris: [],
   },
   {
     id: 'rule_year_2016',
@@ -705,9 +703,7 @@ export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
       exactYear: 2016,
       minConfidence: 68,
     },
-    spotifyPlaylistId: '37i9dQZF1DX6J5NfMJS675',
-    lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedTrackUris: ['spotify:track:1r9xUipOqoNwggBpENDsvJ'],
+    syncedTrackUris: [],
   },
   {
     id: 'rule_melodic_club',
@@ -723,9 +719,7 @@ export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
       maxBpm: 132,
       minConfidence: 80,
     },
-    spotifyPlaylistId: '37i9dQZF1DX6J5NfMJS675',
-    lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedTrackUris: ['spotify:track:1r9xUipOqoNwggBpENDsvJ'],
+    syncedTrackUris: [],
   },
   {
     id: 'rule_nl_roadtrip',
@@ -739,29 +733,9 @@ export const INITIAL_PLAYLIST_RULES: AutoPlaylistRule[] = [
       folderContains: 'Nederlandse Klassiekers',
       minConfidence: 80,
     },
-    spotifyPlaylistId: '37i9dQZF1DX4fpCWaHOned',
-    lastSyncedAt: '2026-11-02T19:40:00Z',
-    syncedTrackUris: ['spotify:track:0VjIjW4GlUZAMYd2vXMi3c'],
+    syncedTrackUris: [],
   },
 ];
 
-export const INITIAL_SYNC_HISTORY: SyncHistoryEntry[] = [
-  {
-    id: 'sync_hist_1',
-    timestamp: '2026-11-02T19:40:00Z',
-    playlistName: 'MP3Spot Jaar: 2016',
-    addedTracks: 1,
-    skippedDuplicates: 0,
-    mode: 'local_staged',
-    spotifyUrl: 'https://open.spotify.com/playlist/37i9dQZF1DX6J5NfMJS675',
-  },
-  {
-    id: 'sync_hist_2',
-    timestamp: '2026-11-02T19:40:00Z',
-    playlistName: 'MP3Spot Jaar: 2017',
-    addedTracks: 1,
-    skippedDuplicates: 0,
-    mode: 'local_staged',
-    spotifyUrl: 'https://open.spotify.com/playlist/37i9dQZF1DX4fpCWaHOned',
-  },
-];
+export const INITIAL_SYNC_HISTORY: SyncHistoryEntry[] = [];
+

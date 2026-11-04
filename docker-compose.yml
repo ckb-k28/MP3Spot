@@ -1,26 +1,22 @@
 # ==============================================================================
-# MP3Spot — Dockhand / Docker Compose Stack (Zero-Copy vanaf GitHub)
+# MP3Spot — Dockhand / Portainer Docker Compose Stack (GitHub Built Image)
 #
-# Plak deze YAML direct in een nieuwe Dockhand / Portainer Stack.
-# De container installeert Git, haalt de nieuwste broncode direct op vanaf GitHub,
-# bouwt de frontend en start de server zonder dat je handmatig bestanden hoeft te kopiëren.
+# GitHub Actions (.github/workflows/docker-publish.yml) bouwt automatisch de
+# Docker image bij elke push en publiceert deze naar GitHub Container Registry.
+# Geen "command:" of git-clone script meer nodig in deze docker-compose.yml!
 # ==============================================================================
 
 services:
   mp3spot:
-    # OPTIE A (Standaard Zero-Copy): Start een Node 22 Alpine container en kloont
-    # automatisch je GitHub repository naar het volume mp3spot_repo:/app.
-    image: node:22-alpine
+    image: ${MP3SPOT_IMAGE:-ghcr.io/ckb-k28/mp3spot:latest}
+    pull_policy: always
     container_name: mp3spot
     restart: unless-stopped
-    working_dir: /app
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # Vervang door jouw eigen GitHub repository URL:
-      - GIT_REPO_URL=${GIT_REPO_URL:-https://github.com/jouw-gebruikersnaam/mp3spot.git}
       # --- Spotify Developer API Gegevens (optioneel) ---
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
@@ -32,48 +28,20 @@ services:
     volumes:
       # 1. Lokale muziekmap: Koppel je muziekmap (:rw zodat MP3Spot Spotify ID3-tags kan bijschrijven)
       - ${HOST_MUSIC_PATH:-/mnt/nas/muziek}:/music:rw
-      # 2. Persistente App Data: Bewaart database, match-historie en playlistregels (buiten /app)
+      # 2. Persistente App Data: Bewaart database, match-historie, OAuth en playlistregels
       - ${HOST_DATA_PATH:-mp3spot_data}:/data
       # 3. Afspeellijst Exports: Schrijft .m3u8, .json en .csv bestanden direct naar je host/NAS
       - ${HOST_EXPORTS_PATH:-./exports}:/exports
-      # 4. Applicatiecode volume: Behoudt de gekloonde code tussen container-herstarts
-      - mp3spot_repo:/app
-    # Veilige clone-and-sync sequence:
-    # Voorkomt de 'fatal: destination path /app already exists and is not an empty directory' fout
-    # door eerst naar een tijdelijke map te klonen en de inhoud veilig naar /app te kopiëren.
-    command: >
-      sh -c "apk add --no-cache git &&
-      git config --global --add safe.directory /app &&
-      if [ ! -d /app/.git ]; then
-        echo 'Cloning MP3Spot repository from GitHub...' &&
-        rm -rf /tmp/mp3spot_clone &&
-        mkdir -p /tmp/mp3spot_clone &&
-        git clone $$GIT_REPO_URL /tmp/mp3spot_clone &&
-        cp -a /tmp/mp3spot_clone/. /app/ &&
-        rm -rf /tmp/mp3spot_clone;
-      else
-        echo 'Updating MP3Spot repository from GitHub...' &&
-        cd /app &&
-        git remote set-url origin $$GIT_REPO_URL &&
-        git fetch origin &&
-        git reset --hard origin/HEAD &&
-        git clean -fd;
-      fi &&
-      cd /app &&
-      npm install --include=dev --legacy-peer-deps &&
-      npm run build &&
-      npm run start"
 
 volumes:
-  mp3spot_repo:
   mp3spot_data:
 
 # ------------------------------------------------------------------------------
-# ALTERNATIEF: OPTIE B (Native Docker Git Build)
-# Als jouw Docker daemon 'build from git URL' ondersteunt, kun je in plaats van
-# 'image: node:22-alpine' en het 'command: ...' blok bovenin, dit build-blok gebruiken:
+# ALTERNATIEF: OPTIE B (Native Docker Git Build vanaf GitHub Dockerfile)
+# Wil je dat Docker zelf het Dockerfile bouwt vanaf GitHub? Vervang "image:" door:
 #
 #   build:
-#     context: https://github.com/jouw-gebruikersnaam/mp3spot.git#main
+#     context: https://github.com/ckb-k28/mp3spot.git#main
 #     dockerfile: Dockerfile
 # ------------------------------------------------------------------------------
+

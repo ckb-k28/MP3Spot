@@ -83,8 +83,8 @@ interface InlineConfigPanelProps {
   setStackExportsPath: (v: string) => void;
   stackPort: string;
   setStackPort: (v: string) => void;
-  dockhandMode: 'git_clone' | 'git_build';
-  setDockhandMode: (mode: 'git_clone' | 'git_build') => void;
+  dockhandMode: 'ghcr_image' | 'git_build';
+  setDockhandMode: (mode: 'ghcr_image' | 'git_build') => void;
   generatedDockhandYaml: string;
   copyToClipboard: (text: string, key: string) => void;
   copiedUrlKey: string | null;
@@ -620,10 +620,10 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                     <Server className="w-4 h-4 text-[#FF8F00]" />
                     <div>
                       <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-                        3. Dockhand Stack YAML (Zero-Copy GitHub Automatisch)
+                        3. Dockhand Stack YAML (GitHub Actions Built Docker Image — Geen Command)
                       </h3>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Plak deze stack in Dockhand of Portainer. Haalt bij het opstarten zelf de code op van GitHub; je hoeft geen bestanden handmatig te kopiëren!
+                        GitHub Actions bouwt automatisch het Docker image (`ghcr.io`). Plak deze schone `docker-compose.yml` zonder `command:` direct in Dockhand!
                       </p>
                     </div>
                   </div>
@@ -632,14 +632,14 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                     <div className="flex items-center gap-1 p-0.5 bg-slate-200 dark:bg-[#151719] rounded-lg text-xs">
                       <button
                         type="button"
-                        onClick={() => setDockhandMode('git_clone')}
+                        onClick={() => setDockhandMode('ghcr_image')}
                         className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                          dockhandMode === 'git_clone'
+                          dockhandMode === 'ghcr_image'
                             ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs'
                             : 'text-slate-600 dark:text-slate-400'
                         }`}
                       >
-                        Git Clone (Aanbevolen)
+                        GHCR Image (Aanbevolen)
                       </button>
                       <button
                         type="button"
@@ -682,7 +682,7 @@ export const InlineConfigPanel: React.FC<InlineConfigPanelProps> = ({
                       type="text"
                       value={stackGitRepoUrl}
                       onChange={(e) => setStackGitRepoUrl(e.target.value)}
-                      placeholder="https://github.com/jouw-gebruikersnaam/mp3spot.git"
+                      placeholder="https://github.com/ckb-k28/mp3spot.git"
                       className="w-full font-mono text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#141618] text-slate-900 dark:text-white focus:outline-none focus:border-[#FF8F00]"
                     />
                   </div>

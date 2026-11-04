@@ -1,228 +1,208 @@
 <div align="center">
-
-<img src="./public/mp3spot-icon.svg" width="128" height="128" alt="MP3Spot Logo - Kolenkachel Editie" />
-
-# MP3Spot
-
-**Lokale Muziekbibliotheek Synchronisatie • Binaire Spotify ID3v2.3 Tagging • Automatische Jaar-Afspeellijsten**
-
-[![Thema: Kolenkachel](https://img.shields.io/badge/Thema-Kolenkachel-FF8F00?style=for-the-badge&logoColor=white)](https://github.com)
-[![Spotify: Geïntegreerd](https://img.shields.io/badge/Spotify-1DB954?style=for-the-badge&logo=spotify&logoColor=white)](https://spotify.com)
-[![ID3 Tagging: v2.3 Binair](https://img.shields.io/badge/ID3_Tagging-v2.3_Binair-D84315?style=for-the-badge)](https://github.com)
-[![Docker: Dockhand Zero--Copy](https://img.shields.io/badge/Docker-Dockhand_Zero--Copy-00B4D8?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
-[![Toegang: Direct LAN / Geen Login](https://img.shields.io/badge/Toegang-Direct_LAN-3A3D40?style=for-the-badge&logoColor=E6E7E9)](https://github.com)
-[![Build Versie: YYYY.MM.DD.build](https://img.shields.io/badge/Build_Versie-YYYY.MM.DD[.build%23]-E6E7E9?style=for-the-badge&labelColor=3A3D40&color=FF8F00)](https://github.com)
-
+  <img src="./public/mp3spot-icon.svg" alt="MP3Spot Logo" width="110" height="110" />
+  <h1>MP3Spot</h1>
+  <p><strong>Self-Hosted Lokale Muziekbibliotheek Synchronisatie, Binaire Spotify ID3v2.3 Tagger & Automatische Afspeellijst-Engine</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/Docker-GHCR%20Ready-F58220?style=flat-square&logo=docker&logoColor=white" alt="Docker GHCR Ready" />
+    <img src="https://img.shields.io/badge/Spotify_API-2026_Compatible-00A3B4?style=flat-square&logo=spotify&logoColor=white" alt="Spotify Web API 2026" />
+    <img src="https://img.shields.io/badge/ID3v2.3-Binary_Tagger-22C55E?style=flat-square" alt="ID3v2.3 Binary Tagger" />
+    <img src="https://img.shields.io/badge/Design-Kolenkachel_UI-161616?style=flat-square" alt="Kolenkachel Design System" />
+  </p>
 </div>
 
 ---
 
-## 🎨 Kolenkachel Kleurenschema
+**MP3Spot** is een self-hosted webapplicatie ontworpen voor het scannen van lokale audiocollecties (`.mp3`, `.flac`, `.m4a`, `.wav`), het automatisch koppelen van nummers aan de officiële **Spotify-catalogus**, het binair terugschrijven van geverifieerde **ID3v2.3-metadata** naar je eigen `.mp3`-bestanden op schijf, én het automatisch opbouwen en synchroniseren van **Spotify-afspeellijsten per releasejaar** (`MP3Spot Jaar: YYYY`), map, genre of tempo.
 
-MP3Spot is vormgegeven volgens het **Kolenkachel Design Systeem**: een industriële en warme visuele identiteit geïnspireerd op een gietijzeren kolenkachel met een gloeiend hart en een hete vlamkern.
-
-| Kleur | Naam | Hex Code | Gebruik in de Applicatie & Icoon |
-| :--- | :--- | :--- | :--- |
-| <img src="https://via.placeholder.com/20/3A3D40/3A3D40.png" width="20" height="20" alt="#3A3D40" /> | **Nacht** (Lichter Antraciet) | `#3A3D40` | Gietijzeren oppervlakken, achtergronden, vinyl disc randen & panels |
-| <img src="https://via.placeholder.com/20/E6E7E9/E6E7E9.png" width="20" height="20" alt="#E6E7E9" /> | **Dag** (Zacht Asgrijs) | `#E6E7E9` | Primaire teksten, duidelijke typografie en contrasterende metadata |
-| <img src="https://via.placeholder.com/20/D84315/D84315.png" width="20" height="20" alt="#D84315" /> | **Gloeiende Kolen** (Warm Roodoranje) | `#D84315` | ID3-tagging badges, actieknoppen, waarschuwingen en vurige geluidsgolven |
-| <img src="https://via.placeholder.com/20/FF8F00/FF8F00.png" width="20" height="20" alt="#FF8F00" /> | **Knisperend Vuur** (Amber Oranje) | `#FF8F00` | Primaire accenten, actieve filters, gloed-effecten en jaarafspeellijst badges |
-| <img src="https://via.placeholder.com/20/00B4D8/00B4D8.png" width="20" height="20" alt="#00B4D8" /> | **Hete Vlamkern** (Helder Blauw) | `#00B4D8` | Spil van het vinyl-icoon, Spotify match-percentages en actieve audio-indicatoren |
-| <img src="https://via.placeholder.com/20/1DB954/1DB954.png" width="20" height="20" alt="#1DB954" /> | **Spotify Groen** | `#1DB954` | Officiële Spotify status, directe deep-links en synchronisatieknoppen |
-
-Het officiële icoon bevindt zich in `public/mp3spot-icon.svg` en combineert een vinylplaat (Nacht), geluidsgolven in de vorm van opstijgende vlammen (Gloeiende Kolen & Knisperend Vuur) en een hete blauwe kernspil (Hete Vlamkern).
+De volledige interface is gebouwd volgens het industriële **Kolenkachel Design Systeem** (met zowel een *Warm Carbon Dark Mode* als een *Warm Alabaster Light Mode*) en kan direct als kant-en-klare container in **Dockhand**, **Portainer** of **Docker Compose** worden uitgerold.
 
 ---
 
-## 🔥 Belangrijkste Functionaliteiten
+## ✨ Kernfunctionaliteiten
 
-### 1. Directe Toegang (Zonder Login Drempel)
-- MP3Spot opent direct zonder login- of authenticatiewand.
-- Ideaal voor lokaal gebruik op je thuisnetwerk (LAN), achter een eigen reverse proxy (bijv. Nginx, Traefik, NPM, Cloudflare Tunnels of Tailscale) of als persoonlijke NAS-container.
+### 1. Lokale Bibliotheek & Server-Side `/music` Volume Scanner
+- **Recursieve `/music` Scanner**: Scant duizenden audiobestanden rechtstreeks vanaf een gemount Docker-volume (`/music:rw`) op je NAS, Unraid-, Synology- of Linux-server.
+- **Browser Map-Upload**: Ondersteunt daarnaast direct slepen en selecteren van lokale mappen vanuit de browser (`webkitdirectory`) inclusief client-side ID3v2.2/v2.3/v2.4 header-extractie.
+- **In-line Track-Editor**: Pas titel, artiest, album, jaar, genre en BPM direct aan in de tabel met automatische herberekening van de Spotify-match.
+- **Snel Bibliotheek Opschonen**: Wis met één klik onderin de zijbalk alle geladen tracks en regels uit de interface en uit `/data/mp3spot-state.json` om met een schone lei te starten.
 
-### 2. Lokale Bestanden Taggen met Spotify Metadata (`ID3v2.3`)
-- **Direct wegschrijven naar schijf**: Schrijft officiële Spotify-tags rechtstreeks terug in je muziekbestanden op het `/music:rw` volume.
-- **Binaire ID3-Frames**:
-  - `TIT2` (Geverifieerde tracktitel)
-  - `TPE1` (Artiest / uitvoerende)
-  - `TALB` (Officieel album)
-  - `TYER` (Exact releasejaar)
-  - `TCON` (Spotify artiest-genre)
-  - `TSRC` (Officiële ISRC-registratiecode)
-  - `WOAF` (Directe Spotify Web URL)
-- **Directe Download**: Mogelijkheid om via de browser met één klik een volledig getagde `.mp3` te downloaden.
+### 2. Binaire Spotify ID3v2.3 Tagger
+- **Schrijf Spotify Metadata naar `.mp3`**: Vervangt of injecteert een standaard **ID3v2.3** binary header in je lokale `.mp3`-bestanden op het `/music`-volume (of via een directe browser-download).
+- **Volledige Frame-ondersteuning**:
+  - `TIT2` — Officiële Spotify Tracktitel
+  - `TPE1` — Officiële Spotify Artiest(en)
+  - `TALB` — Officieel Spotify Album
+  - `TYER` — Officiële Releasejaar (`YYYY`)
+  - `TCON` — Genre & Subgenre
+  - `TSRC` — Internationale ISRC-code
+  - `WOAF` — Officiële Spotify Track URL
+  - `TXXX` — Custom velden voor `SPOTIFY_URI` en `SPOTIFY_ALBUM_ART`
 
-### 3. Automatische Spotify Jaar-Afspeellijsten
-- Zodra een lokaal nummer beschikbaar is op Spotify, plaatst MP3Spot het automatisch in een Spotify-afspeellijst die **ten minste het releasejaar** vertegenwoordigt (bijv. `MP3Spot Jaar: 2016`, `MP3Spot Jaar: 2021`, `MP3Spot Jaar: 2024`).
-- Automatische groepering per map, genre of decennium zonder handmatig sorteerwerk.
+### 3. Meertraps Spotify Matcher & Live URI-Resolutie
+- **5-traps Match-algoritme**:
+  1. Exacte **ISRC-code** verificatie (`isrc:...`)
+  2. Exacte genormaliseerde `track:"..." artist:"..."` zoekopdracht (verwijdert automatisch ruis zoals `(Original Mix)`, `[Remastered]`, `feat.`, bitrate-tags en tracknummers)
+  3. Brede zoekopdracht op schoongemaakte titel + primaire artiest
+  4. Bestandsnaam-fallback wanneer ID3-tags ontbreken of incompleet zijn
+  5. Deterministische lokale fallback-hash wanneer nog geen Spotify API-sleutels zijn gekoppeld
+- **Live URI-Resolutie tijdens Synchronisatie**: Nummers die vóór het koppelen van Spotify zijn gescand, worden tijdens het synchroniseren automatisch alsnog live via de Spotify Search API omgezet naar echte `spotify:track:...` URI's voordat ze aan afspeellijsten worden toegevoegd.
 
-### 4. Meertraps Intelligente Matcher
-- **Trap 1: Exacte ISRC**: Zoekt eerst op de unieke industry track code voor 100% foutloze matches.
-- **Trap 2: Genormaliseerde Query**: Verwijdert overbodige tekens, haakjes en remaster-annotaties.
-- **Trap 3: Fuzzy Levenshtein & Duur**: Vergelijkt lengte in seconden ($\Delta \text{ seconden}$) om *Radio Edits* van *Extended Mixes* te onderscheiden.
+### 4. Automatische Jaar-Afspeellijsten & Slimme Regels
+- **`MP3Spot Jaar: YYYY`**: Voor elk uniek releasejaar dat in je bibliotheek of via Spotify wordt gedetecteerd, maakt MP3Spot automatisch een bijbehorende jaar-afspeellijst aan (bijv. `MP3Spot Jaar: 1995`, `MP3Spot Jaar: 2024`).
+- **Slimme Afspeellijst-regels**: Maak daarnaast dynamische lijsten op basis van:
+  - **Bronmap** (bijv. `/music/Vinyl Rips` of `/music/90s Classics`)
+  - **Genre** (bijv. `Synthwave`, `Techno`, `Indie Rock`)
+  - **Decennium / Jaarbereik** (bijv. `1990 – 1999`)
+  - **BPM & Tempo** (bijv. `120 – 138 BPM` voor workout- of DJ-sets)
+  - **Aangepaste Zoekfilters** (combinaties van artiest, album of trefwoord)
 
-### 5. Differentiële Synchronisatie (No-Duplicate Engine)
-- Voordat nummers naar Spotify worden gepusht, berekent MP3Spot het verschil (*diff*) met reeds bestaande tracks in je afspeellijsten. Alleen ontbrekende tracks worden toegevoegd.
+### 5. Differentiële Spotify Synchronisatie (2026 Web API Ready)
+- **Compatibel met de nieuwste Spotify Web API (2026)**:
+  - Maakt afspeellijsten aan via `POST /v1/me/playlists` (geen handmatige User ID nodig).
+  - Voegt nummers in batches van 100 toe via `POST /v1/playlists/{id}/items` met automatische fallback naar `/tracks`.
+  - Hergebruikt bestaande Spotify-afspeellijsten met dezelfde naam en voegt uitsluitend nog ontbrekende nummers toe (voorkomt duplicaten).
+- **Interactieve Diff-Preview**: Controleer per afspeellijst exact welke nummers nieuw worden toegevoegd (`+ Toe te voegen`), welke al gesynchroniseerd zijn (`✓ In Spotify`) en welke handmatige review vragen.
 
-### 6. Automatische Build-Versienummering (`year.month.day[.build#]`)
-- Buildnummers volgen het schema `YYYY.MM.DD` voor de eerste build van de dag (`build# = 0`).
-- Latere builds op dezelfde dag krijgen automatisch `.1`, `.2`, enz. (bijv. `2026.11.03.1`).
-- Direct zichtbaar in de interface footer en in `src/version.json`.
+### 6. Inline Configuratie (Zonder Container Herstart)
+- Stel je **Spotify Client ID**, **Spotify Client Secret**, **Publieke Redirect URI** en **Host-paden** direct in via de webinterface onder **5. Configuratie** in de zijbalk.
+- Alle instellingen worden persistent opgeslagen in `/data/mp3spot-config.json` op de server en hebben direct voorrang, zonder dat je de Docker-container hoeft te herstarten.
 
 ---
 
-## 🐳 Uitrollen in Dockhand / Portainer (Zero-Copy vanaf GitHub)
+## 🧭 Navigatie & Architectuur
 
-Je hoeft **geen enkel bestand handmatig naar je server te kopiëren**. Kopieer een van onderstaande configuraties rechtstreeks in je **Dockhand** of **Portainer** stack:
+MP3Spot heeft een gestroomlijnde layout met een **inklapbare zijbalk** (`Hoofdnavigatie`) waarin de 5 hoofdmodules en alle mappen/afspeellijsten zijn ondergebracht:
 
-### Optie A: Standalone Git-Clone Stack (100% Zero-Copy)
+| Module in Zijbalk | Beschrijving |
+| :--- | :--- |
+| **1. Bibliotheek** | Lokale audiobestanden scannen (`/music` of browser), filteren op map/jaar/afspeellijst, metadata inline bewerken en binaire ID3v2.3-tags naar `.mp3`-bestanden schrijven. |
+| **2. Spotify Matcher** | Meertraps match-analyse bekijken, betrouwbaarheidsscores controleren, alternatieve Spotify-kandidaten kiezen of een handmatige Spotify URI (`spotify:track:...`) koppelen. |
+| **3. Slimme Lijsten** | Automatische `MP3Spot Jaar: YYYY` lijsten beheren en eigen dynamische afspeellijst-regels opstellen op basis van map, genre, BPM of zoekterm. |
+| **4. Synchronisatie** | Differentiële vergelijking per afspeellijst bekijken en met één klik alle gematchte nummers naar je Spotify-account pushen of exporteren als `.m3u8` / `.json`. |
+| **5. Configuratie** | Inline Spotify API-sleutels (`Client ID`, `Client Secret`, `Redirect URI`) en volume-paden opslaan in `/data/mp3spot-config.json`, plus een kant-en-klare **Dockhand Stack YAML** genereren. |
 
-Deze stack start op een standaard `node:22-alpine` image, haalt de meest recente code automatisch op via `git clone`, installeert dependencies en start MP3Spot op poort `3000`.
+---
 
-> **💡 Opgelost in v2026.11.03:**
-> Docker koppelt volumes al vóórdat het container-commando draait. Hierdoor was `/app` niet leeg en gaf Git de melding:
-> `fatal: destination path '/app' already exists and is not an empty directory.`
-> Onderstaande configuratie lost dit definitief op door persistente data te scheiden naar `/data` én een veilige *clone-and-sync* methode te gebruiken via `/tmp/mp3spot_clone`.
+## 🐳 Uitrollen met Dockhand / Portainer / Docker Compose
+
+De officiële Docker-image wordt automatisch door GitHub Actions gebouwd en gepubliceerd naar de GitHub Container Registry:
+**`ghcr.io/ckb-k28/mp3spot:latest`**
+
+### Aanbevolen `docker-compose.yml` (of Dockhand Stack)
 
 ```yaml
 services:
   mp3spot:
-    image: node:22-alpine
-    container_name: mp3spot
-    restart: unless-stopped
-    working_dir: /app
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - GIT_REPO_URL=https://github.com/JOUW_GEBRUIKERSNAAM/mp3spot.git
-      # --- Volume Paden ---
-      - MUSIC_LIBRARY_PATH=/music
-      - DATA_PATH=/data
-      - EXPORTS_PATH=/exports
-      # --- Spotify Developer Credentials (optioneel voor live sync) ---
-      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
-      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
-      - APP_URL=http://localhost:3000
-    volumes:
-      # 1. Je lokale muziekmap op de NAS/host (:rw om ID3-tags te kunnen schrijven)
-      - /mnt/nas/muziek:/music:rw
-      # 2. Persistente opslag voor app-state en database (veilig gescheiden van /app)
-      - mp3spot_data:/data
-      # 3. Exportmap voor .m3u8, .json en .csv bestanden
-      - ./exports:/exports
-      # 4. Volume voor MP3Spot broncode
-      - mp3spot_repo:/app
-    command: >
-      sh -c "apk add --no-cache git &&
-      git config --global --add safe.directory /app &&
-      if [ ! -d /app/.git ]; then
-        echo 'Cloning MP3Spot repository from GitHub...' &&
-        rm -rf /tmp/mp3spot_clone &&
-        mkdir -p /tmp/mp3spot_clone &&
-        git clone $$GIT_REPO_URL /tmp/mp3spot_clone &&
-        cp -a /tmp/mp3spot_clone/. /app/ &&
-        rm -rf /tmp/mp3spot_clone;
-      else
-        echo 'Updating MP3Spot repository from GitHub...' &&
-        cd /app &&
-        git remote set-url origin $$GIT_REPO_URL &&
-        git fetch origin &&
-        git reset --hard origin/HEAD &&
-        git clean -fd;
-      fi &&
-      cd /app &&
-      npm install --include=dev --legacy-peer-deps &&
-      npm run build &&
-      npm run start"
-
-volumes:
-  mp3spot_repo:
-  mp3spot_data:
-```
-
----
-
-### Optie B: Native Docker Git Build Stack
-
-Laat Docker het image direct compileren vanaf de GitHub repository (als jouw Docker daemon remote git build ondersteunt):
-
-```yaml
-services:
-  mp3spot:
-    build:
-      context: https://github.com/JOUW_GEBRUIKERSNAAM/mp3spot.git#main
-      dockerfile: Dockerfile
+    image: ghcr.io/ckb-k28/mp3spot:latest
+    pull_policy: always
     container_name: mp3spot
     restart: unless-stopped
     ports:
       - "3000:3000"
+    volumes:
+      # Lokale muziekcollectie (:rw is vereist om ID3v2.3 tags terug te schrijven naar .mp3)
+      - /pad/naar/jouw/muziek:/music:rw
+      # Persistente opslag voor status, inline configuratie en Spotify OAuth-sessies
+      - /pad/naar/dockhand/mp3spot/data:/data
+      # Exportmap voor gegenereerde .m3u8 en .json afspeellijsten
+      - /pad/naar/dockhand/mp3spot/exports:/exports
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - MUSIC_LIBRARY_PATH=/music
-      - DATA_PATH=/data
-      - EXPORTS_PATH=/exports
+      - TZ=Europe/Amsterdam
+      # Optioneel: kan ook direct in de webinterface onder '5. Configuratie' worden ingevuld
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
-      - APP_URL=http://localhost:3000
-    volumes:
-      - /mnt/nas/muziek:/music:rw
-      - mp3spot_data:/data
-      - ./exports:/exports
-
-volumes:
-  mp3spot_data:
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-}
+      - SPOTIFY_MARKET=NL
+      - AUTO_SCAN_INTERVAL_MINUTES=30
 ```
 
----
-
-## 💾 Overzicht van Volume Mappings
-
-MP3Spot werkt met drie geïsoleerde paden binnen de container:
-
-| Container Pad | Omgevingsvariabele | Rechten | Doel | Voorbeeld Host Mapping |
-| :--- | :--- | :---: | :--- | :--- |
-| `/music` | `MUSIC_LIBRARY_PATH` | `:rw` | De bronmap met je MP3/FLAC collectie. `:rw` is vereist zodat MP3Spot ID3-tags direct kan bijwerken. | `/mnt/nas/muziek:/music:rw` |
-| `/data` *(of `/app/data`)* | `DATA_PATH` | `:rw` | Bewaart `mp3spot-state.json` (gescande bibliotheek, matchgeschiedenis en playlistregels). | `mp3spot_data:/data` |
-| `/exports` | `EXPORTS_PATH` | `:rw` | Map waarin MP3Spot geëxporteerde `.m3u8` lijsten, `.json` mappings en `.csv` bestanden opslaat. | `./exports:/exports` |
+### Updaten naar de nieuwste versie in Dockhand
+1. Open je **MP3Spot** stack of container in **Dockhand**.
+2. Klik op **Pull Image** / **Update Stack** (of voer `docker compose pull && docker compose up -d` uit).
+3. Controleer linksboven onder het MP3Spot-logo of het nieuwe build-versienummer (`vYYYY.MM.DD`) zichtbaar is.
 
 ---
 
-## 🎵 Spotify Developer API Koppelen
+## 💾 Volume Mappings & Persistente Bestanden
 
-Om gevonden tracks automatisch te synchroniseren naar afspeellijsten in je Spotify-account:
-
-1. Ga naar het [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) en log in met je Spotify-account.
-2. Klik op **Create App** en vul een naam in (bijv. `MP3Spot`).
-3. Voeg bij **Redirect URIs** de URL van jouw MP3Spot-instantie toe, gevolgd door `/auth/callback`:
-   - Lokaal: `http://localhost:3000/auth/callback`
-   - Server / Domein: `https://muziek.jouwdomein.nl/auth/callback`
-4. Kopieer je **Client ID** en **Client Secret** naar je environment variabelen (of vul ze in via de instellingenknop in MP3Spot).
-5. Klik in MP3Spot rechtsboven op **Verbind Spotify**.
+| Container Pad | Aanbevolen Modus | Inhoud & Functie |
+| :--- | :---: | :--- |
+| **`/music`** | `:rw` *(Lezen & Schrijven)* | Bevat je lokale `.mp3`, `.flac`, `.m4a`, `.wav` en `.ogg` bestanden. Met `:rw` kan MP3Spot binaire ID3v2.3-tags rechtstreeks in de `.mp3`-bestanden bijwerken. Gebruik `:ro` als je uitsluitend wilt lezen. |
+| **`/data`** | `:rw` *(Vereist)* | Bevat de persistente bestanden van MP3Spot:<br>• `mp3spot-state.json` — Gescande nummers, matches en afspeellijst-regels<br>• `mp3spot-config.json` — Inline opgeslagen Spotify API-sleutels en paden<br>• `spotify-session.json` — Actieve Spotify OAuth access- en refresh-tokens |
+| **`/exports`** | `:rw` *(Optioneel)* | Doelmap voor geëxporteerde `.m3u8`- en `.json`-afspeellijstbestanden. |
 
 ---
 
-## 🛠️ Lokale Ontwikkeling
+## 🎧 Spotify Developer API Configuratie (Stapsgewijs)
 
+Om echte Spotify-zoekopdrachten uit te voeren en afspeellijsten rechtstreeks in je Spotify-account aan te maken en te vullen, koppel je een eigen Spotify Developer App:
+
+1. Ga naar het **[Spotify Developer Dashboard](https://developer.spotify.com/dashboard)** en log in met je Spotify-account.
+2. Klik op **Create App** en vul in:
+   - **App name**: `MP3Spot`
+   - **App description**: `Lokale MP3-bibliotheek synchronisatie en ID3v2.3 tagger`
+   - **Redirect URIs**: Voeg het exacte callback-adres toe waarop je MP3Spot opent, gevolgd door `/auth/callback`, bijvoorbeeld:
+     - Lokaal op dezelfde machine: `http://127.0.0.1:3000/auth/callback`
+     - Via een HTTPS reverse proxy / domein: `https://mp3spot.jouwdomein.nl/auth/callback`
+     *(Let op: Spotify vereist voor niet-HTTPS adressen een expliciete loopback zoals `127.0.0.1` of een HTTPS reverse proxy).*
+   - Vink **Web API** aan en klik op **Save**.
+3. **BELANGRIJK — Voeg je Spotify-account toe onder "Users and Access"**:
+   - Nieuwe Spotify Developer apps staan standaard in **Development Mode**.
+   - Open in het Spotify Developer Dashboard je app en ga naar het tabblad **User Management** / **Users and Access**.
+   - Voeg daar je eigen **naam en het e-mailadres van je Spotify-account** toe. Zonder deze stap blokkeert Spotify toegang tot `/v1/me` en het toevoegen van nummers aan afspeellijsten (`403 Forbidden`).
+4. Open **Settings** in het Spotify Developer Dashboard en kopieer je **Client ID** en **Client Secret**.
+5. Open **MP3Spot**, klik in de linker zijbalk op **5. Configuratie**, plak je **Client ID**, **Client Secret** en **Redirect URI** en klik op **Bewaar & Activeer Direct**.
+6. Klik rechtsboven op **Verbind Spotify** om de OAuth-koppeling te voltooien.
+
+---
+
+## 🎨 Kolenkachel Design Systeem
+
+De interface van MP3Spot volgt de **Kolenkachel** ontwerpstandaard: een hoog-contrast, industrieel kleurenpalet met zowel een donkere als een lichte modus.
+
+| Element | Kleurcode | Toepassing |
+| :--- | :--- | :--- |
+| **Warm Carbon** | `#161616` | Primaire achtergrond in Dark Mode |
+| **Warm Dark Surface** | `#202020` | Kaarten, zijbalk, modale vensters en tabellen |
+| **Warm Alabaster** | `#F7F6F2` | Primaire achtergrond in Light Mode |
+| **Kolenkachel Oranje** | `#F58220` | Primaire actieknoppen, actieve navigatie en ID3-indicatoren |
+| **Kolenkachel Teal** | `#00A3B4` | Secundaire accenten, pad-badges en systeemstatus |
+| **Emerald Match** | `#22C55E` | Geverifieerde Spotify-matches en gesynchroniseerde afspeellijsten |
+
+**Typografie**:
+- **Titels & Koppen**: `Outfit` (600 / 700, strakke letterafstand)
+- **Interface & Tabellen**: `Plus Jakarta Sans` (400 / 500 / 600)
+- **Tijdstippen, Versienummers, ISRC & Paden**: `JetBrains Mono`
+
+---
+
+## 🛠️ Lokale Ontwikkeling & Automatische Versienummering
+
+### Vereisten
+- **Node.js** `>= 20.x`
+- **npm** `>= 10.x`
+
+### Starten in ontwikkelmodus
 ```bash
-# Repository klonen
-git clone https://github.com/JOUW_GEBRUIKERSNAAM/mp3spot.git
-cd mp3spot
-
-# Afhankelijkheden installeren
+# 1. Installeer dependencies
 npm install
 
-# Lokale testserver starten (poort 3000)
-npm run dev
+# 2. Kopieer de voorbeeld-omgevingsvariabelen (optioneel)
+cp .env.example .env
 
-# Productie build genereren met automatische versienummering
-npm run build
+# 3. Start de full-stack Express + Vite server op poort 3000
+npm run dev
 ```
 
----
+### Productie-build & Versienummering
+Elke keer dat `npm run build` wordt uitgevoerd (lokaal of via GitHub Actions), genereert `scripts/version-build.ts` automatisch een nieuw datum-gebaseerd versienummer (`YYYY.MM.DD` of `YYYY.MM.DD.build#` bij meerdere builds op dezelfde dag) in `src/version.ts` en `package.json`:
 
-<div align="center">
-  <small>Ontworpen met het Kolenkachel Kleurenschema • Gemaakt voor muziekliefhebbers met een eigen lokale collectie</small>
-</div>
+```bash
+# Genereer nieuw build-versienummer en bouw de frontend in ./dist
+npm run build
+
+# Start de productieserver
+npm start
+```

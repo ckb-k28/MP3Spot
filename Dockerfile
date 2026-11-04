@@ -16,8 +16,8 @@ RUN npm install --include=dev --legacy-peer-deps
 # Kopieer de volledige applicatiebroncode
 COPY . .
 
-# Bouw de productie-frontend (genereert automatisch buildversie year.month.day[.build#])
-RUN npm run build
+# Bouw de productie-frontend (behoudt de exacte buildversie uit src/version.json)
+RUN SKIP_VERSION_BUMP=true npm run build
 
 # Maak standaard mappen aan voor gemounte volumes:
 # /music   -> Lokale muziekcollectie (read/write voor het terugschrijven van Spotify ID3-tags)

@@ -853,17 +853,39 @@ async function searchTrackCandidates(
 ): Promise<SpotifyCandidate[]> {
   if (spotifyToken) {
     try {
-      const cleanTitle = normalizeString(local.title) || local.title;
-      const cleanArtist = normalizeString(local.artist) || local.artist;
+      let rawTitle = (local.title || '').replace(/\.(mp3|flac|m4a|wav|aiff|ogg)$/i, '').trim();
+      let rawArtist = (local.artist || '').trim();
+
+      const isUnknownArtist =
+        !rawArtist ||
+        /^(onbekende artiest|unknown artist|unknown|onbekend|various artists|va)\b/i.test(rawArtist);
+
+      if (isUnknownArtist && rawTitle.includes(' - ')) {
+        const splitParts = rawTitle.split(/\s+[-–—]\s+/);
+        if (splitParts.length >= 2) {
+          rawArtist = splitParts[0].trim();
+          rawTitle = splitParts.slice(1).join(' - ').trim();
+        }
+      }
+
+      const cleanTitle = normalizeString(rawTitle) || rawTitle;
+      const cleanArtist = isUnknownArtist ? '' : normalizeString(rawArtist) || rawArtist;
       const queries: string[] = [];
 
-      if (local.isrc) {
+      if (local.isrc && /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/i.test(local.isrc.trim())) {
         queries.push(`isrc:${local.isrc.trim()}`);
       }
-      queries.push(`track:${cleanTitle} artist:${cleanArtist}`);
-      queries.push(`${cleanArtist} ${cleanTitle}`);
+      if (cleanArtist && cleanTitle) {
+        queries.push(`${cleanArtist} ${cleanTitle}`);
+        queries.push(`track:${cleanTitle} artist:${cleanArtist}`);
+      }
+      if (cleanTitle) {
+        queries.push(cleanTitle);
+      }
 
-      for (const q of queries) {
+      const uniqueQueries = Array.from(new Set(queries.filter(Boolean)));
+
+      for (const q of uniqueQueries) {
         const url = `https://api.spotify.com/v1/search?${new URLSearchParams({
           q,
           type: 'track',
@@ -877,38 +899,49 @@ async function searchTrackCandidates(
           const data = (await resp.json()) as any;
           const items = data?.tracks?.items || [];
           if (items.length > 0) {
-            const candidates: SpotifyCandidate[] = items.map((item: any) => {
-              const artistName = (item.artists || []).map((a: any) => a.name).join(', ');
-              const durationSec = Math.round((item.duration_ms || 200000) / 1000);
-              const releaseYear =
-                parseInt((item.album?.release_date || '2020').slice(0, 4), 10) || 2020;
-              const isrc = item.external_ids?.isrc;
-              const { confidence, matchMethod } = computeCandidateConfidence(local, {
-                title: item.name,
-                artist: artistName,
-                album: item.album?.name || '',
-                durationSec,
-                isrc,
+            const candidates: SpotifyCandidate[] = items
+              .filter((item: any) => item && item.id)
+              .map((item: any) => {
+                const artistName = (item.artists || []).map((a: any) => a.name).join(', ');
+                const durationSec = Math.round((item.duration_ms || 200000) / 1000);
+                const releaseYear =
+                  parseInt((item.album?.release_date || '2020').slice(0, 4), 10) || 2020;
+                const isrc = item.external_ids?.isrc;
+                const { confidence, matchMethod } = computeCandidateConfidence(
+                  {
+                    ...local,
+                    title: rawTitle || local.title,
+                    artist: cleanArtist ? rawArtist : artistName,
+                  },
+                  {
+                    title: item.name,
+                    artist: artistName,
+                    album: item.album?.name || '',
+                    durationSec,
+                    isrc,
+                  }
+                );
+
+                return {
+                  spotifyId: item.id,
+                  uri: item.uri || `spotify:track:${item.id}`,
+                  title: item.name,
+                  artist: artistName,
+                  album: item.album?.name || 'Onbekend Album',
+                  durationSec,
+                  releaseYear,
+                  isrc,
+                  confidence,
+                  matchMethod,
+                  externalUrl:
+                    item.external_urls?.spotify || `https://open.spotify.com/track/${item.id}`,
+                };
               });
 
-              return {
-                spotifyId: item.id,
-                uri: item.uri || `spotify:track:${item.id}`,
-                title: item.name,
-                artist: artistName,
-                album: item.album?.name || 'Onbekend Album',
-                durationSec,
-                releaseYear,
-                isrc,
-                confidence,
-                matchMethod,
-                externalUrl:
-                  item.external_urls?.spotify || `https://open.spotify.com/track/${item.id}`,
-              };
-            });
-
-            candidates.sort((a, b) => b.confidence - a.confidence);
-            return candidates;
+            if (candidates.length > 0) {
+              candidates.sort((a, b) => b.confidence - a.confidence);
+              return candidates;
+            }
           }
         }
       }
@@ -1418,6 +1451,33 @@ async function startServer() {
       res.json({ ok: true, savedTo: STATE_FILE_PATH });
     } catch (err) {
       res.status(500).json({ error: `Kon status niet opslaan in ${STATE_FILE_PATH}` });
+    }
+  });
+
+  app.post('/api/server-library/clean', requireAppAuth, async (_req: Request, res: Response) => {
+    try {
+      await fs.promises.mkdir(DATA_PATH, { recursive: true });
+      let existingState: Record<string, any> = {};
+      if (fs.existsSync(STATE_FILE_PATH)) {
+        try {
+          existingState = JSON.parse(await fs.promises.readFile(STATE_FILE_PATH, 'utf8'));
+        } catch {
+          existingState = {};
+        }
+      }
+      const cleanedState = {
+        ...existingState,
+        updatedAt: new Date().toISOString(),
+        tracks: [],
+      };
+      await fs.promises.writeFile(
+        STATE_FILE_PATH,
+        JSON.stringify(cleanedState, null, 2),
+        'utf8'
+      );
+      res.json({ ok: true, cleanedAt: cleanedState.updatedAt });
+    } catch {
+      res.status(500).json({ error: 'Kon de bibliotheekstatus op de server niet wissen.' });
     }
   });
 
@@ -2120,7 +2180,7 @@ async function startServer() {
         id: pl.id,
         name: pl.name,
         description: pl.description || '',
-        trackCount: pl.tracks?.total || 0,
+        trackCount: pl.items?.total ?? pl.tracks?.total ?? 0,
         externalUrl: pl.external_urls?.spotify || `https://open.spotify.com/playlist/${pl.id}`,
         isPublic: Boolean(pl.public),
       }));
@@ -2132,6 +2192,88 @@ async function startServer() {
     }
   });
 
+  // Helper to fetch existing track URIs in a Spotify playlist (supports both /items and /tracks endpoints)
+  async function getSpotifyPlaylistExistingUris(
+    playlistId: string,
+    token: string
+  ): Promise<{ ok: boolean; status: number; uris: Set<string> }> {
+    const uris = new Set<string>();
+    // Try /items first (Spotify 2026 Web API), then fallback to /tracks
+    let resp = await fetch(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items?limit=100`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!resp.ok) {
+      resp = await fetch(
+        `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+    }
+    if (!resp.ok) {
+      return { ok: false, status: resp.status, uris };
+    }
+    try {
+      const data = (await resp.json()) as any;
+      for (const entry of data.items || []) {
+        const uri = entry?.item?.uri || entry?.track?.uri;
+        if (typeof uri === 'string' && uri.startsWith('spotify:track:')) {
+          uris.add(uri);
+        }
+      }
+    } catch {
+      // Ignore parse error
+    }
+    return { ok: true, status: 200, uris };
+  }
+
+  // Helper to add a batch of track URIs to a Spotify playlist (supports both /items and /tracks endpoints)
+  async function addTracksBatchToSpotifyPlaylist(
+    playlistId: string,
+    uris: string[],
+    token: string
+  ): Promise<{ ok: boolean; errorDetails?: string }> {
+    if (uris.length === 0) return { ok: true };
+    const payload = JSON.stringify({ uris });
+
+    // 1. Try POST /v1/playlists/{id}/items (Spotify 2026 Web API)
+    const itemsResp = await fetch(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/items`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: payload,
+      }
+    );
+    if (itemsResp.ok) {
+      return { ok: true };
+    }
+    const itemsErrText = await itemsResp.text().catch(() => '');
+
+    // 2. Fallback to POST /v1/playlists/{id}/tracks
+    const tracksResp = await fetch(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: payload,
+      }
+    );
+    if (tracksResp.ok) {
+      return { ok: true };
+    }
+    const tracksErrText = await tracksResp.text().catch(() => '');
+    return {
+      ok: false,
+      errorDetails: `items(${itemsResp.status}): ${itemsErrText} | tracks(${tracksResp.status}): ${tracksErrText}`,
+    };
+  }
+
   // --- 7. Execute Differential Playlist Synchronization ---
   app.post('/api/spotify/sync', requireAppAuth, async (req: Request, res: Response) => {
     const { playlists } = req.body as {
@@ -2141,6 +2283,16 @@ async function startServer() {
         description: string;
         isPublic: boolean;
         trackUris: string[];
+        tracks?: Array<{
+          id: string;
+          uri: string;
+          title: string;
+          artist: string;
+          album?: string;
+          isrc?: string;
+          durationSec?: number;
+          externalUrl?: string;
+        }>;
         existingSpotifyPlaylistId?: string;
       }>;
     };
@@ -2150,6 +2302,40 @@ async function startServer() {
 
     if (session && token) {
       const syncResults = [];
+      const resolvedTracks: Record<string, SpotifyCandidate> = {};
+
+      // Fetch the user's existing Spotify playlists so we can reuse playlists already created with the same name
+      const userPlaylistsByName = new Map<string, { id: string; externalUrl: string }>();
+      const userOwnedPlaylistIds = new Set<string>();
+      try {
+        const mePlResp = await fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (mePlResp.ok) {
+          const mePlData = (await mePlResp.json()) as any;
+          for (const item of mePlData.items || []) {
+            if (!item || !item.id) continue;
+            const isOwnerOrCollab =
+              !session.user.id ||
+              session.user.id === 'me' ||
+              item.owner?.id === session.user.id ||
+              item.collaborative;
+            if (isOwnerOrCollab && !String(item.id).startsWith('37i9dQZF')) {
+              userOwnedPlaylistIds.add(item.id);
+              const normName = String(item.name || '').trim().toLowerCase();
+              if (normName && !userPlaylistsByName.has(normName)) {
+                userPlaylistsByName.set(normName, {
+                  id: item.id,
+                  externalUrl:
+                    item.external_urls?.spotify || `https://open.spotify.com/playlist/${item.id}`,
+                });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Could not pre-fetch user playlists:', e);
+      }
 
       for (const pl of playlists) {
         try {
@@ -2157,25 +2343,49 @@ async function startServer() {
           let externalUrl = '';
           let existingUris = new Set<string>();
 
+          // Ignore Spotify editorial playlists (37i9dQZF...) or non-22-char local staged IDs
+          if (
+            targetPlaylistId &&
+            (targetPlaylistId.startsWith('37i9dQZF') ||
+              targetPlaylistId.startsWith('sp_') ||
+              !/^[a-zA-Z0-9]{22}$/.test(targetPlaylistId))
+          ) {
+            targetPlaylistId = undefined;
+          }
+
+          // Check if targetPlaylistId exists and is readable/modifiable on Spotify
           if (targetPlaylistId) {
-            const tracksResp = await fetch(
-              `https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks?fields=items(track(uri))&limit=100`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (tracksResp.ok) {
-              const tracksData = (await tracksResp.json()) as any;
-              for (const item of tracksData.items || []) {
-                if (item?.track?.uri) existingUris.add(item.track.uri);
+            const check = await getSpotifyPlaylistExistingUris(targetPlaylistId, token);
+            if (check.ok) {
+              existingUris = check.uris;
+              externalUrl = `https://open.spotify.com/playlist/${targetPlaylistId}`;
+            } else {
+              targetPlaylistId = undefined;
+            }
+          }
+
+          // If no valid targetPlaylistId yet, check if the user already has a playlist with this exact name
+          if (!targetPlaylistId) {
+            const normName = (pl.name || '').trim().toLowerCase();
+            const existingByName = userPlaylistsByName.get(normName);
+            if (existingByName) {
+              targetPlaylistId = existingByName.id;
+              externalUrl = existingByName.externalUrl;
+              const check = await getSpotifyPlaylistExistingUris(targetPlaylistId, token);
+              if (check.ok) {
+                existingUris = check.uris;
               }
             }
-            externalUrl = `https://open.spotify.com/playlist/${targetPlaylistId}`;
-          } else {
+          }
+
+          // Otherwise, create the playlist on the user's Spotify account
+          if (!targetPlaylistId) {
             const createBody = JSON.stringify({
               name: pl.name,
               description:
                 pl.description ||
                 'Automatisch gesynchroniseerd vanuit lokale muziekbibliotheek via MP3Spot.',
-              public: pl.isPublic,
+              public: Boolean(pl.isPublic),
             });
             let createResp = await fetch('https://api.spotify.com/v1/me/playlists', {
               method: 'POST',
@@ -2206,30 +2416,139 @@ async function startServer() {
               externalUrl =
                 created.external_urls?.spotify ||
                 `https://open.spotify.com/playlist/${created.id}`;
+              if (targetPlaylistId) {
+                userPlaylistsByName.set((pl.name || '').trim().toLowerCase(), {
+                  id: targetPlaylistId,
+                  externalUrl,
+                });
+              }
+            } else {
+              const createErr = await createResp.text().catch(() => '');
+              console.error(`Failed to create playlist "${pl.name}":`, createResp.status, createErr);
             }
           }
 
-          const validUris = pl.trackUris.filter(
-            (u) => u.startsWith('spotify:track:') && !existingUris.has(u)
-          );
+          // Resolve any synthetic/offline track URIs to real Spotify track URIs via live /v1/search
+          const finalPlaylistUris: string[] = [];
+          const trackMetaList = Array.isArray(pl.tracks) ? pl.tracks : [];
+
+          if (trackMetaList.length > 0) {
+            for (const trk of trackMetaList) {
+              if (resolvedTracks[trk.id]) {
+                finalPlaylistUris.push(resolvedTracks[trk.id].uri);
+                continue;
+              }
+
+              const rawId = (trk.uri || '').replace(/^spotify:track:/, '').trim();
+              const isSyntheticOrOffline =
+                !rawId ||
+                !/^[a-zA-Z0-9]{22}$/.test(rawId) ||
+                (trk.externalUrl && trk.externalUrl.includes('/search/'));
+
+              if (!isSyntheticOrOffline) {
+                finalPlaylistUris.push(`spotify:track:${rawId}`);
+              } else {
+                const liveCands = await searchTrackCandidates(
+                  {
+                    id: trk.id,
+                    title: trk.title,
+                    artist: trk.artist,
+                    album: trk.album || '',
+                    durationSec: trk.durationSec || 210,
+                    isrc: trk.isrc,
+                  },
+                  token
+                );
+                const bestLive = liveCands.find(
+                  (c) =>
+                    c.uri.startsWith('spotify:track:') &&
+                    /^[a-zA-Z0-9]{22}$/.test(c.spotifyId) &&
+                    !c.externalUrl.includes('/search/')
+                );
+                if (bestLive) {
+                  resolvedTracks[trk.id] = bestLive;
+                  finalPlaylistUris.push(bestLive.uri);
+                }
+              }
+            }
+          } else {
+            for (const u of pl.trackUris || []) {
+              const rawId = u.replace(/^spotify:track:/, '').trim();
+              if (/^[a-zA-Z0-9]{22}$/.test(rawId)) {
+                finalPlaylistUris.push(`spotify:track:${rawId}`);
+              }
+            }
+          }
+
+          const uniqueTargetUris = Array.from(new Set(finalPlaylistUris));
+          const validUrisToAdd = uniqueTargetUris.filter((u) => !existingUris.has(u));
 
           let addedCount = 0;
-          if (targetPlaylistId && validUris.length > 0) {
-            for (let i = 0; i < validUris.length; i += 100) {
-              const batch = validUris.slice(i, i + 100);
-              const addResp = await fetch(
-                `https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks`,
-                {
-                  method: 'POST',
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                  },
-                  body: JSON.stringify({ uris: batch }),
-                }
+          const confirmedSyncedUris = new Set<string>(existingUris);
+
+          if (targetPlaylistId && validUrisToAdd.length > 0) {
+            for (let i = 0; i < validUrisToAdd.length; i += 100) {
+              const batch = validUrisToAdd.slice(i, i + 100);
+              const batchRes = await addTracksBatchToSpotifyPlaylist(
+                targetPlaylistId,
+                batch,
+                token
               );
-              if (addResp.ok) {
+
+              if (batchRes.ok) {
                 addedCount += batch.length;
+                for (const u of batch) confirmedSyncedUris.add(u);
+              } else {
+                console.warn(
+                  `Batch add failed for playlist "${pl.name}" (${batchRes.errorDetails}), retrying tracks individually with live search fallback...`
+                );
+                // Fallback: resolve & add each track individually so a single invalid URI never blocks the rest
+                for (const uri of batch) {
+                  let uriToTry = uri;
+                  const matchingMeta = trackMetaList.find(
+                    (t) => t.uri === uri || resolvedTracks[t.id]?.uri === uri
+                  );
+
+                  if (matchingMeta && !resolvedTracks[matchingMeta.id]) {
+                    const liveCands = await searchTrackCandidates(
+                      {
+                        id: matchingMeta.id,
+                        title: matchingMeta.title,
+                        artist: matchingMeta.artist,
+                        album: matchingMeta.album || '',
+                        durationSec: matchingMeta.durationSec || 210,
+                        isrc: matchingMeta.isrc,
+                      },
+                      token
+                    );
+                    const bestLive = liveCands.find(
+                      (c) =>
+                        c.uri.startsWith('spotify:track:') &&
+                        /^[a-zA-Z0-9]{22}$/.test(c.spotifyId) &&
+                        !c.externalUrl.includes('/search/')
+                    );
+                    if (bestLive) {
+                      resolvedTracks[matchingMeta.id] = bestLive;
+                      uriToTry = bestLive.uri;
+                    }
+                  }
+
+                  if (confirmedSyncedUris.has(uriToTry)) continue;
+                  const singleRes = await addTracksBatchToSpotifyPlaylist(
+                    targetPlaylistId,
+                    [uriToTry],
+                    token
+                  );
+                  if (singleRes.ok) {
+                    addedCount += 1;
+                    confirmedSyncedUris.add(uriToTry);
+                  } else {
+                    console.error(
+                      `Could not add track ${uriToTry} to playlist ${pl.name}:`,
+                      singleRes.errorDetails
+                    );
+                  }
+                }
               }
             }
           }
@@ -2237,10 +2556,11 @@ async function startServer() {
           syncResults.push({
             localPlaylistId: pl.id,
             name: pl.name,
-            spotifyPlaylistId: targetPlaylistId || `sp_${pl.id}`,
+            spotifyPlaylistId: targetPlaylistId || undefined,
             externalUrl: externalUrl || 'https://open.spotify.com',
             addedTracks: addedCount,
-            skippedDuplicates: pl.trackUris.length - validUris.length,
+            skippedDuplicates: Math.max(0, uniqueTargetUris.length - validUrisToAdd.length),
+            syncedUris: Array.from(confirmedSyncedUris),
             mode: 'live_spotify',
             timestamp: new Date().toISOString(),
           });
@@ -2252,25 +2572,20 @@ async function startServer() {
       res.json({
         mode: 'live_spotify',
         results: syncResults,
+        resolvedTracks,
       });
       return;
     }
 
     const stagedResults = (playlists || []).map((pl) => {
-      const generatedId = crypto
-        .createHash('md5')
-        .update(pl.name)
-        .digest('base64url')
-        .replace(/[^a-zA-Z0-9]/g, '')
-        .slice(0, 22);
-
       return {
         localPlaylistId: pl.id,
         name: pl.name,
-        spotifyPlaylistId: pl.existingSpotifyPlaylistId || generatedId,
+        spotifyPlaylistId: undefined,
         externalUrl: `https://open.spotify.com/search/${encodeURIComponent(pl.name)}`,
         addedTracks: pl.trackUris.length,
         skippedDuplicates: 0,
+        syncedUris: [],
         mode: 'local_staged',
         timestamp: new Date().toISOString(),
       };
@@ -2279,6 +2594,7 @@ async function startServer() {
     res.json({
       mode: 'local_staged',
       results: stagedResults,
+      resolvedTracks: {},
     });
   });
 

@@ -189,9 +189,9 @@ export default function App() {
 
   // --- Dockhand / GitHub Stack Generator Modal State ---
   const [showDockhandModal, setShowDockhandModal] = useState<boolean>(false);
-  const [dockhandMode, setDockhandMode] = useState<'git_clone' | 'git_build'>('git_clone');
+  const [dockhandMode, setDockhandMode] = useState<'ghcr_image' | 'git_build'>('ghcr_image');
   const [stackGitRepoUrl, setStackGitRepoUrl] = useState<string>(
-    'https://github.com/jouw-gebruikersnaam/mp3spot.git'
+    'https://github.com/ckb-k28/mp3spot.git'
   );
   const [stackMusicPath, setStackMusicPath] = useState<string>('/mnt/nas/muziek');
   const [stackDataPath, setStackDataPath] = useState<string>('mp3spot_data');
@@ -202,7 +202,11 @@ export default function App() {
   const [tracks, setTracks] = useState<LocalAudioTrack[]>(() => {
     try {
       const saved = localStorage.getItem('mp3spot_tracks_v2');
-      return saved ? JSON.parse(saved) : INITIAL_LOCAL_LIBRARY;
+      if (saved !== null) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+      return INITIAL_LOCAL_LIBRARY;
     } catch {
       return INITIAL_LOCAL_LIBRARY;
     }
@@ -419,7 +423,7 @@ export default function App() {
       if (resp.ok) {
         const data = await resp.json();
         if (data.exists && data.state) {
-          if (Array.isArray(data.state.tracks) && data.state.tracks.length > 0) {
+          if (Array.isArray(data.state.tracks)) {
             setTracks(data.state.tracks);
           }
           if (Array.isArray(data.state.playlistRules) && data.state.playlistRules.length > 0) {
@@ -433,6 +437,41 @@ export default function App() {
     } catch {
       // Ignore fallback to localStorage
     }
+  };
+
+  // Clean all tracks from the interface & server state
+  const handleCleanAllTracks = async () => {
+    const removedCount = tracks.length;
+    setTracks([]);
+    setSelectedFolder('ALL');
+    setEditingTrackId(null);
+    setManualSearchTrackId(null);
+    setManualSearchResults([]);
+    setPlaylistRules((prev) =>
+      prev
+        .filter((r) => !r.id.startsWith('rule_year_'))
+        .map((r) => ({ ...r, syncedTrackUris: [] }))
+    );
+    try {
+      localStorage.setItem('mp3spot_tracks_v2', JSON.stringify([]));
+    } catch {
+      // Ignore
+    }
+    try {
+      await fetch('/api/server-library/clean', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+    } catch {
+      // Ignore network error
+    }
+    setNoticeBanner({
+      type: 'info',
+      message:
+        removedCount > 0
+          ? `Alle ${removedCount} tracks zijn uit de interface gewist. De bibliotheek is nu volledig schoon.`
+          : 'De bibliotheek is al leeg (0 tracks in de interface).',
+    });
   };
 
   // Fetch volume paths and system status on mount
@@ -1403,16 +1442,27 @@ export default function App() {
   };
 
   // Run Differential Synchronization
-  const handleRunDifferentialSync = async () => {
-    const activePlaylistsToSync = evaluatedPlaylists.filter(
-      (ep) => ep.rule.autoSync && ep.newUrisToAdd.length > 0
-    );
+  const handleRunDifferentialSync = async (targetRuleIdOrEvent?: string | React.MouseEvent) => {
+    const specificRuleId =
+      typeof targetRuleIdOrEvent === 'string' ? targetRuleIdOrEvent : undefined;
+
+    // When connected to Spotify, allow syncing any playlist that has matched tracks (so empty playlists on Spotify or previously staged playlists get populated!)
+    const activePlaylistsToSync = evaluatedPlaylists.filter((ep) => {
+      if (specificRuleId) return ep.rule.id === specificRuleId && ep.readyMatches.length > 0;
+      if (!ep.rule.autoSync) return false;
+      if (spotifyAuth.connected) {
+        return ep.readyMatches.length > 0;
+      }
+      return ep.newUrisToAdd.length > 0;
+    });
 
     if (activePlaylistsToSync.length === 0) {
       setNoticeBanner({
         type: 'info',
         message:
-          'Alle afspeellijsten (inclusief jaar-afspeellijsten) zijn al volledig up-to-date.',
+          tracks.length === 0
+            ? 'Scan eerst je lokale muziekbibliotheek voordat je afspeellijsten synchroniseert.'
+            : 'Geen gekoppelde Spotify-tracks gevonden om te synchroniseren.',
       });
       return;
     }
@@ -1424,7 +1474,17 @@ export default function App() {
         name: ep.rule.name,
         description: ep.rule.description,
         isPublic: ep.rule.isPublic,
-        trackUris: ep.newUrisToAdd,
+        trackUris: ep.allUris,
+        tracks: ep.readyMatches.map((t) => ({
+          id: t.id,
+          uri: t.selectedMatch!.uri,
+          title: t.selectedMatch?.title || t.title,
+          artist: t.selectedMatch?.artist || t.artist,
+          album: t.selectedMatch?.album || t.album,
+          isrc: t.selectedMatch?.isrc || t.isrc,
+          durationSec: t.selectedMatch?.durationSec || t.durationSec,
+          externalUrl: t.selectedMatch?.externalUrl,
+        })),
         existingSpotifyPlaylistId: ep.rule.spotifyPlaylistId,
       }));
 
@@ -1443,46 +1503,74 @@ export default function App() {
           results: Array<{
             localPlaylistId: string;
             name: string;
-            spotifyPlaylistId: string;
+            spotifyPlaylistId?: string;
             externalUrl: string;
             addedTracks: number;
             skippedDuplicates: number;
+            syncedUris?: string[];
             mode: 'live_spotify' | 'local_staged';
             timestamp: string;
           }>;
+          resolvedTracks?: Record<string, SpotifyCandidate>;
         };
 
         const nowIso = new Date().toISOString();
         const syncedRuleMap = new Map(
           data.results.map((r) => [r.localPlaylistId, r])
         );
+        const resolvedMap = data.resolvedTracks || {};
 
         setPlaylistRules((prev) =>
           prev.map((rule) => {
             const res = syncedRuleMap.get(rule.id);
             const ep = evaluatedPlaylists.find((e) => e.rule.id === rule.id);
             if (!res || !ep) return rule;
+            if (data.mode === 'live_spotify') {
+              return {
+                ...rule,
+                spotifyPlaylistId: res.spotifyPlaylistId || rule.spotifyPlaylistId,
+                lastSyncedAt: nowIso,
+                syncedTrackUris:
+                  Array.isArray(res.syncedUris) && res.syncedUris.length > 0
+                    ? res.syncedUris
+                    : rule.syncedTrackUris,
+              };
+            }
             return {
               ...rule,
-              spotifyPlaylistId: res.spotifyPlaylistId,
               lastSyncedAt: nowIso,
-              syncedTrackUris: Array.from(
-                new Set([...rule.syncedTrackUris, ...ep.newUrisToAdd])
-              ),
             };
           })
         );
 
-        const newlySyncedUris = new Set(
-          activePlaylistsToSync.flatMap((ep) => ep.newUrisToAdd)
+        const allConfirmedSyncedUris = new Set(
+          data.results.flatMap((r) => r.syncedUris || [])
         );
+
         setTracks((prev) =>
           prev.map((trk) => {
-            if (trk.selectedMatch && newlySyncedUris.has(trk.selectedMatch.uri)) {
+            const resolvedCand = resolvedMap[trk.id];
+            const effectiveMatch = resolvedCand || trk.selectedMatch;
+            if (
+              effectiveMatch &&
+              (allConfirmedSyncedUris.has(effectiveMatch.uri) ||
+                Boolean(resolvedCand))
+            ) {
               return {
                 ...trk,
-                matchStatus: 'synced',
-                lastSyncedAt: nowIso,
+                selectedMatch: effectiveMatch,
+                year: effectiveMatch.releaseYear || trk.year,
+                isrc: effectiveMatch.isrc || trk.isrc,
+                matchStatus:
+                  data.mode === 'live_spotify' &&
+                  allConfirmedSyncedUris.has(effectiveMatch.uri)
+                    ? 'synced'
+                    : trk.matchStatus,
+                lastSyncedAt:
+                  data.mode === 'live_spotify' &&
+                  allConfirmedSyncedUris.has(effectiveMatch.uri)
+                    ? nowIso
+                    : trk.lastSyncedAt,
               };
             }
             return trk;
@@ -1501,12 +1589,16 @@ export default function App() {
         setSyncHistory((prev) => [...newEntries, ...prev]);
 
         const totalAdded = data.results.reduce((acc, r) => acc + r.addedTracks, 0);
+        const totalAlreadyPresent = data.results.reduce(
+          (acc, r) => acc + r.skippedDuplicates,
+          0
+        );
         setNoticeBanner({
           type: 'success',
           message:
             data.mode === 'live_spotify'
-              ? `Live Spotify Synchronisatie voltooid: ${totalAdded} nieuwe nummers toegevoegd over ${data.results.length} afspeellijsten (waaronder de Jaar-afspeellijsten).`
-              : `Synchronisatie-diff geregistreerd (${totalAdded} nieuwe nummers over ${data.results.length} afspeellijsten). Verbind je Spotify-account om ze direct naar je Spotify-profiel te pushen.`,
+              ? `Live Spotify Synchronisatie voltooid: ${totalAdded} nummers toegevoegd aan ${data.results.length} Spotify-afspeellijsten (${totalAlreadyPresent} stonden al in de lijst).`
+              : `Lokale staging gecontroleerd (${totalAdded} nummers over ${data.results.length} afspeellijsten). Verbind eerst je Spotify-account om afspeellijsten en nummers daadwerkelijk op Spotify te plaatsen.`,
         });
       }
     } finally {
@@ -1664,30 +1756,35 @@ export default function App() {
   // Generate Dockhand / Docker Compose YAML string dynamically with all 3 volume mappings (:rw on /music for ID3 tagging)
   const generatedDockhandYaml = useMemo(() => {
     const cleanRepo =
-      stackGitRepoUrl.trim() || 'https://github.com/jouw-gebruikersnaam/mp3spot.git';
+      stackGitRepoUrl.trim() || 'https://github.com/ckb-k28/mp3spot.git';
+    const ghOwnerRepoMatch = cleanRepo
+      .replace(/\.git$/i, '')
+      .match(/github\.com[:/]([^/]+\/[^/]+)/i);
+    const ghOwnerRepo = (
+      ghOwnerRepoMatch ? ghOwnerRepoMatch[1] : 'ckb-k28/mp3spot'
+    ).toLowerCase();
     const musicMount = stackMusicPath.trim() || '/mnt/nas/muziek';
     const dataMount = stackDataPath.trim() || 'mp3spot_data';
     const exportsMount = stackExportsPath.trim() || './exports';
     const isNamedDataVol = !dataMount.startsWith('/') && !dataMount.startsWith('.');
 
-    if (dockhandMode === 'git_clone') {
+    if (dockhandMode === 'ghcr_image') {
       return `# ==============================================================================
-# MP3Spot (v${buildInfo.version}) — Zero-Copy Dockhand Stack (Automatische GitHub Clone)
-# Je hoeft GEEN bestanden handmatig te kopiëren. Plak deze YAML in Dockhand!
-# De container haalt bij het opstarten zelf alle bronbestanden op van GitHub.
+# MP3Spot (v${buildInfo.version}) — Dockhand Stack (GitHub Actions Built Image)
+# GitHub Actions (.github/workflows/docker-publish.yml) bouwt automatisch de
+# Docker image. Geen "command:" meer nodig in deze docker-compose.yml!
 # ==============================================================================
 services:
   mp3spot:
-    image: node:22-alpine
+    image: ghcr.io/${ghOwnerRepo}:latest
+    pull_policy: always
     container_name: mp3spot
     restart: unless-stopped
-    working_dir: /app
     ports:
       - "${stackPort || '3000'}:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - GIT_REPO_URL=${cleanRepo}
       - MUSIC_LIBRARY_PATH=/music
       - DATA_PATH=/data
       - EXPORTS_PATH=/exports
@@ -1697,42 +1794,15 @@ services:
     volumes:
       # 1. Lokale muziekmap op de host/NAS (:rw voor Spotify ID3v2.3 tagging)
       - ${musicMount}:/music:rw
-      # 2. Persistente database & app-status (buiten /app)
+      # 2. Persistente database & app-status
       - ${dataMount}:/data
       # 3. Geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
-      - ${exportsMount}:/exports
-      # 4. Volume voor MP3Spot applicatiecode
-      - mp3spot_repo:/app
-    command: >
-      sh -c "apk add --no-cache git &&
-      git config --global --add safe.directory /app &&
-      if [ ! -d /app/.git ]; then
-        echo 'Cloning MP3Spot repository from GitHub...' &&
-        rm -rf /tmp/mp3spot_clone &&
-        mkdir -p /tmp/mp3spot_clone &&
-        git clone $$GIT_REPO_URL /tmp/mp3spot_clone &&
-        cp -a /tmp/mp3spot_clone/. /app/ &&
-        rm -rf /tmp/mp3spot_clone;
-      else
-        echo 'Updating MP3Spot repository from GitHub...' &&
-        cd /app &&
-        git remote set-url origin $$GIT_REPO_URL &&
-        git fetch origin &&
-        git reset --hard origin/HEAD &&
-        git clean -fd;
-      fi &&
-      cd /app &&
-      npm install --include=dev --legacy-peer-deps &&
-      npm run build &&
-      npm run start"
-
-volumes:
-  mp3spot_repo:${isNamedDataVol ? `\n  ${dataMount}:` : ''}`;
+      - ${exportsMount}:/exports${isNamedDataVol ? `\n\nvolumes:\n  ${dataMount}:` : ''}`;
     }
 
     return `# ==============================================================================
 # MP3Spot (v${buildInfo.version}) — Native Docker Git Build Stack voor Dockhand
-# Docker bouwt de Dockerfile direct vanaf je GitHub-URL zonder lokale bestanden.
+# Docker bouwt de Dockerfile direct vanaf je GitHub-URL zonder "command:" blok.
 # ==============================================================================
 services:
   mp3spot:
@@ -1830,14 +1900,14 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           <div className="flex items-center gap-2 p-1 bg-slate-100 dark:bg-[#16181A] border border-slate-200 dark:border-[#3A3D40] rounded-lg text-xs">
             <button
               type="button"
-              onClick={() => setDockhandMode('git_clone')}
+              onClick={() => setDockhandMode('ghcr_image')}
               className={`flex-1 py-2 px-3 font-medium rounded-md transition-colors ${
-                dockhandMode === 'git_clone'
+                dockhandMode === 'ghcr_image'
                   ? 'bg-white dark:bg-[#202225] text-slate-900 dark:text-white shadow-xs border border-slate-200 dark:border-[#3A3D40]'
                   : 'text-slate-600 dark:text-slate-400'
               }`}
             >
-              Optie 1: Standalone Git-Clone Container (100% Zero-Copy YAML)
+              Optie 1: GitHub Actions Docker Image (ghcr.io — Geen Command)
             </button>
             <button
               type="button"
@@ -1862,7 +1932,7 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                 type="text"
                 value={stackGitRepoUrl}
                 onChange={(e) => setStackGitRepoUrl(e.target.value)}
-                placeholder="https://github.com/gebruiker/mp3spot.git"
+                placeholder="https://github.com/ckb-k28/mp3spot.git"
                 className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-slate-50 dark:bg-[#16181A] text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#FF8F00]"
               />
             </div>
@@ -2038,152 +2108,8 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
           </a>
         </div>
 
-        {/* Zone 2: Polished 5-Tab Segmented Control (Always visible & responsive) */}
-        <nav
-          className="flex items-center gap-1.5 p-1 bg-slate-100 dark:bg-[#151719] border border-slate-200 dark:border-[#3A3D40] rounded-xl overflow-x-auto no-scrollbar max-w-full"
-          role="tablist"
-          aria-label="MP3Spot Hoofdnavigatie"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'library'}
-            onClick={() => handleSwitchTab('library')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'library'
-                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
-                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
-            }`}
-          >
-            <FolderOpen className={`w-3.5 h-3.5 ${activeTab === 'library' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
-            <span>Bibliotheek</span>
-            <span
-              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
-                activeTab === 'library'
-                  ? 'bg-slate-950/20 text-slate-950 font-bold'
-                  : 'bg-slate-200 dark:bg-[#2A2D30] text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {metrics.total}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'matcher'}
-            onClick={() => handleSwitchTab('matcher')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'matcher'
-                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
-                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
-            }`}
-          >
-            <Sparkles className={`w-3.5 h-3.5 ${activeTab === 'matcher' ? 'text-slate-950' : 'text-[#00B4D8]'}`} />
-            <span>Spotify Matcher</span>
-            <span
-              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
-                activeTab === 'matcher'
-                  ? 'bg-slate-950/20 text-slate-950 font-bold'
-                  : 'bg-[#FF8F00]/20 text-[#FF8F00]'
-              }`}
-            >
-              {metrics.matchRatePct}%
-            </span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'playlists'}
-            onClick={() => handleSwitchTab('playlists')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'playlists'
-                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
-                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
-            }`}
-          >
-            <Calendar className={`w-3.5 h-3.5 ${activeTab === 'playlists' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
-            <span>Slimme Lijsten</span>
-            <span
-              className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
-                activeTab === 'playlists'
-                  ? 'bg-slate-950/20 text-slate-950 font-bold'
-                  : 'bg-slate-200 dark:bg-[#2A2D30] text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {evaluatedPlaylists.length}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'sync'}
-            onClick={() => handleSwitchTab('sync')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'sync'
-                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
-                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
-            }`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${activeTab === 'sync' ? 'text-slate-950 animate-spin' : 'text-[#00B4D8]'}`} />
-            <span>Synchronisatie</span>
-            {totalPendingSyncTracks > 0 && (
-              <span
-                className={`font-mono tabular-nums text-[10px] px-1.5 py-0.2 rounded-full ${
-                  activeTab === 'sync'
-                    ? 'bg-slate-950/20 text-slate-950 font-bold'
-                    : 'bg-[#00B4D8]/20 text-[#00B4D8] font-bold'
-                }`}
-              >
-                +{totalPendingSyncTracks}
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'config'}
-            onClick={() => handleSwitchTab('config')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'config'
-                ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-md ring-1 ring-[#FF8F00]/50 scale-[1.02]'
-                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-[#202225]'
-            }`}
-          >
-            <Sliders className={`w-3.5 h-3.5 ${activeTab === 'config' ? 'text-slate-950' : 'text-[#FF8F00]'}`} />
-            <span>Configuratie</span>
-            <span
-              className={`font-mono text-[9px] px-1 py-0.2 rounded ${
-                activeTab === 'config'
-                  ? 'bg-slate-950/20 text-slate-950 font-bold'
-                  : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-semibold'
-              }`}
-            >
-              Inline
-            </span>
-          </button>
-        </nav>
-
-        {/* Zone 3: Quick Action Controls */}
+        {/* Right Zone: Theme & Spotify Quick Action Controls */}
         <div className="flex items-center gap-2 shrink-0">
-          {/* Quick Toggle for Inline Config Banner (Accessible from any tab) */}
-          <button
-            type="button"
-            onClick={() => setShowInlineConfigBanner((prev) => !prev)}
-            title="Snelle Inline Configuratie uitklappen"
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-              showInlineConfigBanner
-                ? 'border-[#FF8F00] bg-[#FF8F00]/15 text-[#FF8F00] font-semibold'
-                : 'border-slate-200 dark:border-[#3A3D40] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2A2D30]'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-[#FF8F00]" />
-            <span className="hidden sm:inline">Inline Config</span>
-          </button>
-
           {/* Theme switcher */}
           <button
             type="button"
@@ -2557,11 +2483,11 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               )}
             </div>
 
-            <div className="pt-2">
+            <div className="pt-2 space-y-2">
               <button
                 type="button"
                 onClick={() => setDarkMode((d) => !d)}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-md border border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-md border border-slate-200 dark:border-[#3A3D40] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors cursor-pointer"
               >
                 {darkMode ? (
                   <>
@@ -2574,6 +2500,22 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     <span>Donker Thema</span>
                   </>
                 )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCleanAllTracks}
+                disabled={tracks.length === 0}
+                title="Wis alle geladen tracks uit de interface"
+                className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold rounded-md border border-[#D84315]/50 bg-[#D84315]/10 text-[#D84315] dark:text-[#FF8F00] hover:bg-[#D84315]/20 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>Clean Alle Tracks</span>
+                </span>
+                <span className="font-mono tabular-nums text-[10px] px-1.5 py-0.5 rounded bg-[#D84315]/20">
+                  {tracks.length}
+                </span>
               </button>
             </div>
           </div>
@@ -2792,12 +2734,12 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
               </div>
             </div>
 
-            {/* Quick direct jumper tabs + Optional Sidebar Button for Smaller Screens */}
-            <div className="flex flex-wrap items-center gap-1.5">
+            {/* Optional Sidebar Button for Smaller Screens */}
+            <div className="flex flex-wrap items-center gap-1.5 lg:hidden">
               <button
                 type="button"
                 onClick={() => setIsMobileSidebarOpen(true)}
-                className="lg:hidden flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#121416] text-[11px] font-medium text-slate-700 dark:text-slate-300 hover:border-[#FF8F00] transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-[#3A3D40] bg-white dark:bg-[#121416] text-[11px] font-medium text-slate-700 dark:text-slate-300 hover:border-[#FF8F00] transition-colors cursor-pointer"
               >
                 <PanelLeft className="w-3.5 h-3.5 text-[#FF8F00]" />
                 <span>
@@ -2807,31 +2749,6 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                     : ''}
                 </span>
               </button>
-
-              <div className="flex items-center gap-1 bg-slate-200/60 dark:bg-[#121416] p-1 rounded-lg text-[11px]">
-                {(
-                  [
-                    ['library', 'Bibliotheek'],
-                    ['matcher', 'Matcher'],
-                    ['playlists', 'Lijsten'],
-                    ['sync', 'Sync'],
-                    ['config', 'Config'],
-                  ] as const
-                ).map(([tabId, tabName]) => (
-                  <button
-                    key={tabId}
-                    type="button"
-                    onClick={() => handleSwitchTab(tabId)}
-                    className={`px-2.5 py-1 rounded-md font-medium transition-all cursor-pointer ${
-                      activeTab === tabId
-                        ? 'bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 font-bold shadow-xs'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    {tabName}
-                  </button>
-                ))}
-              </div>
             </div>
           </div>
 
@@ -3850,11 +3767,17 @@ ${isNamedDataVol ? `\nvolumes:\n  ${dataMount}:` : ''}`;
                         </div>
                         <button
                           type="button"
-                          onClick={handleRunDifferentialSync}
+                          onClick={() => handleRunDifferentialSync(activePlaylistEval.rule.id)}
                           disabled={isSyncing}
                           className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-[#D84315] to-[#FF8F00] text-slate-950 hover:brightness-110 transition-all whitespace-nowrap shrink-0 shadow-sm cursor-pointer disabled:opacity-50"
                         >
-                          Synchroniseer Deze Lijst ({activePlaylistEval.newUrisToAdd.length} nieuw)
+                          {isSyncing
+                            ? 'Synchroniseren...'
+                            : `Synchroniseer Deze Lijst (${
+                                activePlaylistEval.newUrisToAdd.length > 0
+                                  ? `${activePlaylistEval.newUrisToAdd.length} nieuw`
+                                  : `${activePlaylistEval.readyMatches.length} tracks`
+                              })`}
                         </button>
                       </div>
 
