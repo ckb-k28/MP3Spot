@@ -206,3 +206,23 @@ npm run build
 # Start de productieserver
 npm start
 ```
+
+---
+
+## 🩺 Probleemoplossing (Dockhand / Synology NAS)
+
+### Foutmelding: `ENOENT: no such file or directory, open '/app/package.json'`
+Als je in de containerlogs ziet dat `npm` crasht op het ontbreken van `/app/package.json`, komt dit door een van de volgende twee oorzaken in je **Dockhand / Docker Compose** configuratie:
+
+1. **Een volume is gemount op `/app` in plaats van `/data`**:
+   - Als je in `volumes:` een lege host-map of oud volume koppelt aan `:/app` (bijv. `- /volume1/docker/mp3spot:/app` of `- mp3spot_data:/app`), overschrijft Docker de volledige `/app`-map in de container met een lege map, waardoor `package.json` verdwijnt.
+   - **Directe oplossing in Dockhand**: Verwijder de volume-mount op `:/app` (en eventueel `working_dir: /app`) en koppel je data-volume uitsluitend aan **`:/data`**:
+     ```yaml
+     volumes:
+       - /volume1/music2:/music:rw
+       - /volume1/docker/mp3spot/data:/data
+       - /volume1/docker/mp3spot/exports:/exports
+     ```
+2. **Permanente beveiliging in de nieuwe Docker Image**:
+   - In de nieuwste `Dockerfile` wordt MP3Spot ingebakken in **`/opt/mp3spot`** met een slimme `docker-entrypoint.sh`. Zelfs als er per ongeluk een volume op `/app` wordt gemount, schakelt de container bij het opstarten automatisch over naar `/opt/mp3spot` en start de server zonder foutmeldingen.
+

@@ -1,13 +1,15 @@
 # ==============================================================================
 # MP3Spot — Production Dockerfile
-# Kan direct gebouwd worden vanaf GitHub in Dockhand / Portainer / Docker Compose
+# Wordt automatisch gebouwd door GitHub Actions naar ghcr.io/ckb-k28/mp3spot:latest
 # ==============================================================================
 FROM node:22-alpine
 
-# Installeer git voor eventuele git-gebaseerde updates en tijdzone-ondersteuning
+# Installeer git en tijdzone-ondersteuning
 RUN apk add --no-cache git tzdata
 
-WORKDIR /app
+# Installeer de applicatie in /opt/mp3spot zodat een eventuele volume-mount op /app
+# in Dockhand of Synology NAS nooit package.json of de gebouwde app overschrijft!
+WORKDIR /opt/mp3spot
 
 # Kopieer package.json en installeer dependencies
 COPY package*.json .npmrc* ./
@@ -19,11 +21,12 @@ COPY . .
 # Bouw de productie-frontend (behoudt de exacte buildversie uit src/version.json)
 RUN SKIP_VERSION_BUMP=true npm run build
 
-# Maak standaard mappen aan voor gemounte volumes:
-# /music   -> Lokale muziekcollectie (read/write voor het terugschrijven van Spotify ID3-tags)
-# /data    -> Persistente database/status opslag (tracks, afspeellijstregels, sync-historie)
-# /exports -> Automatisch geëxporteerde .m3u8, .json en .csv afspeellijsten op de host
-RUN mkdir -p /music /data /app/data /exports
+# Maak standaard mappen aan voor gemounte volumes én kopieer een spiegel naar /app
+# zodat zowel /opt/mp3spot als /app werkt.
+RUN mkdir -p /music /data /app /app/data /exports \
+  && cp -a /opt/mp3spot/. /app/ \
+  && cp /opt/mp3spot/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh \
+  && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV NODE_ENV=production
 ENV PORT=3000
@@ -35,4 +38,5 @@ VOLUME ["/music", "/data", "/exports"]
 
 EXPOSE 3000
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["npm", "run", "start"]

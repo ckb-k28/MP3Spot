@@ -4,8 +4,24 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function resolveAppRoot(): string {
+  if (fs.existsSync(path.join(__dirname, 'package.json'))) {
+    return __dirname;
+  }
+  if (fs.existsSync('/opt/mp3spot/package.json')) {
+    return '/opt/mp3spot';
+  }
+  return process.cwd();
+}
+
+const APP_ROOT = resolveAppRoot();
 
 interface SpotifySession {
   id: string;
@@ -91,7 +107,7 @@ for (const dir of [DATA_PATH, EXPORTS_PATH]) {
 }
 
 const STATE_FILE_PATH = path.join(DATA_PATH, 'mp3spot-state.json');
-const VERSION_FILE_PATH = path.join(process.cwd(), 'src', 'version.json');
+const VERSION_FILE_PATH = path.join(APP_ROOT, 'src', 'version.json');
 const SPOTIFY_CONFIG_FILE_PATH = path.join(DATA_PATH, 'mp3spot-spotify.json');
 
 function loadSpotifyConfigFromDisk(): void {
@@ -2606,7 +2622,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(APP_ROOT, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
