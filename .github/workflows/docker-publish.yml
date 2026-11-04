@@ -23,8 +23,10 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full history for daily build counter)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -36,14 +38,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read MP3Spot build version from src/version.json
+      - name: Compute MP3Spot build version (year.month.day[.build#])
         id: mp3spot_version
         run: |
-          if [ -f src/version.json ]; then
-            VER=$(node -p "require('./src/version.json').version || 'latest'")
+          TODAY=$(TZ=Europe/Amsterdam date +'%Y.%m.%d')
+          TODAY_ISO=$(TZ=Europe/Amsterdam date +'%Y-%m-%dT00:00:00')
+          COMMITS_TODAY=$(git rev-list --count --since="${TODAY_ISO}" HEAD 2>/dev/null || echo 1)
+          if [ "$COMMITS_TODAY" -gt 0 ]; then
+            GIT_BUILD_NUM=$((COMMITS_TODAY - 1))
           else
-            VER=$(date +'%Y.%m.%d')
+            GIT_BUILD_NUM=0
           fi
+
+          JSON_DATE=""
+          JSON_BUILD=0
+          if [ -f src/version.json ]; then
+            JSON_DATE=$(node -p "require('./src/version.json').date || ''")
+            JSON_BUILD=$(node -p "Number(require('./src/version.json').buildNumber || 0)")
+          fi
+
+          if [ "$JSON_DATE" = "$TODAY" ]; then
+            if [ "$JSON_BUILD" -ge "$GIT_BUILD_NUM" ]; then
+              FINAL_BUILD=$JSON_BUILD
+            else
+              FINAL_BUILD=$GIT_BUILD_NUM
+            fi
+          else
+            FINAL_BUILD=$GIT_BUILD_NUM
+          fi
+
+          if [ "$FINAL_BUILD" -ge 1 ]; then
+            VER="${TODAY}.${FINAL_BUILD}"
+          else
+            VER="${TODAY}"
+          fi
+
+          echo "Computed MP3Spot Version: v${VER} (date=${TODAY}, buildNumber=${FINAL_BUILD}, commitsToday=${COMMITS_TODAY})"
+          echo "date=${TODAY}" >> "$GITHUB_OUTPUT"
+          echo "build_number=${FINAL_BUILD}" >> "$GITHUB_OUTPUT"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Extract Docker metadata (tags & labels)
@@ -62,6 +94,10 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          build-args: |
+            APP_DATE=${{ steps.mp3spot_version.outputs.date }}
+            APP_BUILD_NUMBER=${{ steps.mp3spot_version.outputs.build_number }}
+            BUILD_COMMIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

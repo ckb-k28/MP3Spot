@@ -1,12 +1,12 @@
 {
   "name": "mp3spot",
   "private": true,
-  "version": "2026.11.03",
+  "version": "2026.11.04.5",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
-    "version:bump": "tsx scripts/version-build.ts",
+    "build": "node scripts/version-build.mjs && vite build",
+    "version:bump": "node scripts/version-build.mjs",
     "start": "tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

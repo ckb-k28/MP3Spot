@@ -178,11 +178,21 @@ interface BuildVersionInfo {
 }
 
 function getTodayDateString(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}.${month}.${day}`;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Amsterdam',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return formatter.format(new Date()).replace(/-/g, '.');
+  } catch {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}.${month}.${day}`;
+  }
 }
 
 function formatBuildVersion(dateStr: string, buildNumber: number): string {
@@ -191,19 +201,44 @@ function formatBuildVersion(dateStr: string, buildNumber: number): string {
 
 function readBuildVersionInfo(): BuildVersionInfo {
   const todayStr = getTodayDateString();
-  try {
-    if (fs.existsSync(VERSION_FILE_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(VERSION_FILE_PATH, 'utf8')) as BuildVersionInfo;
-      if (parsed && parsed.date) {
-        return {
-          ...parsed,
-          version: formatBuildVersion(parsed.date, parsed.buildNumber || 0),
-        };
+  const candidateFiles = Array.from(
+    new Set([
+      '/opt/mp3spot/src/version.json',
+      VERSION_FILE_PATH,
+      path.join(process.cwd(), 'src', 'version.json'),
+    ])
+  );
+
+  let bestInfo: BuildVersionInfo | null = null;
+
+  for (const filePath of candidateFiles) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as BuildVersionInfo;
+        if (parsed && parsed.date) {
+          const normalized: BuildVersionInfo = {
+            ...parsed,
+            buildNumber: typeof parsed.buildNumber === 'number' ? parsed.buildNumber : 0,
+            version: formatBuildVersion(parsed.date, parsed.buildNumber || 0),
+          };
+          if (
+            !bestInfo ||
+            normalized.date > bestInfo.date ||
+            (normalized.date === bestInfo.date && normalized.buildNumber > bestInfo.buildNumber)
+          ) {
+            bestInfo = normalized;
+          }
+        }
       }
+    } catch {
+      // Ignore individual file errors
     }
-  } catch {
-    // Fallback below
   }
+
+  if (bestInfo) {
+    return bestInfo;
+  }
+
   return {
     date: todayStr,
     buildNumber: 0,
@@ -1257,10 +1292,12 @@ async function startServer() {
   // Build Version Info Endpoints (year.month.day.build#, first build of day = 0)
   // ==========================================================================
   app.get('/api/build-info', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.json(readBuildVersionInfo());
   });
 
   app.post('/api/build-info/bump', requireAppAuth, (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.json(bumpBuildVersionInfo());
   });
 
@@ -1268,6 +1305,7 @@ async function startServer() {
   // 0. App Login, Volume Status & Security Endpoints
   // ==========================================================================
   app.get('/api/app-auth/status', (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const auth = getAppAuthFromReq(req);
     const config = getConfiguredAuthConfig();
     const buildInfo = readBuildVersionInfo();
@@ -2623,8 +2661,17 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(APP_ROOT, 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

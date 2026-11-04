@@ -381,13 +381,26 @@ export default function App() {
     return headers;
   };
 
+  const applyNewestBuildInfo = (incoming: BuildVersionInfo) => {
+    if (!incoming || !incoming.version) return;
+    setBuildInfo((prev) => {
+      if (
+        incoming.date > prev.date ||
+        (incoming.date === prev.date && (incoming.buildNumber ?? 0) >= (prev.buildNumber ?? 0))
+      ) {
+        return incoming;
+      }
+      return prev;
+    });
+  };
+
   // Fetch Build Info from server
   const fetchBuildInfo = async () => {
     try {
-      const resp = await fetch('/api/build-info');
+      const resp = await fetch(`/api/build-info?t=${Date.now()}`, { cache: 'no-store' });
       if (resp.ok) {
         const data = (await resp.json()) as BuildVersionInfo;
-        if (data.version) setBuildInfo(data);
+        applyNewestBuildInfo(data);
       }
     } catch {
       // Keep bundled version.json
@@ -477,14 +490,15 @@ export default function App() {
   // Fetch volume paths and system status on mount
   const fetchAppAuthStatus = async () => {
     try {
-      const resp = await fetch('/api/app-auth/status', {
+      const resp = await fetch(`/api/app-auth/status?t=${Date.now()}`, {
         headers: getAuthHeaders(),
+        cache: 'no-store',
       });
       if (resp.ok) {
         const data = (await resp.json()) as AppAuthStatus;
         setAppAuthStatus(data);
         if (data.buildInfo?.version) {
-          setBuildInfo(data.buildInfo);
+          applyNewestBuildInfo(data.buildInfo);
         }
       }
     } catch {

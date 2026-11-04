@@ -18,8 +18,13 @@ RUN npm install --include=dev --legacy-peer-deps
 # Kopieer de volledige applicatiebroncode
 COPY . .
 
-# Bouw de productie-frontend (behoudt de exacte buildversie uit src/version.json)
-RUN SKIP_VERSION_BUMP=true npm run build
+# Ontvang optionele build-args vanuit GitHub Actions zodat elke nieuwe build een vers buildnummer krijgt
+ARG APP_DATE=""
+ARG APP_BUILD_NUMBER=""
+ARG BUILD_COMMIT_SHA=""
+
+# Bouw de productie-frontend en schrijf de actuele buildversie naar src/version.json én dist/
+RUN SKIP_VERSION_BUMP=true APP_DATE="${APP_DATE}" APP_BUILD_NUMBER="${APP_BUILD_NUMBER}" npm run build
 
 # Maak standaard mappen aan voor gemounte volumes én kopieer een spiegel naar /app
 # zodat zowel /opt/mp3spot als /app werkt.
